@@ -1,3 +1,4 @@
+#project_root/app/crew/employment_crew.py
 import os
 import logging
 import json
@@ -6,9 +7,18 @@ from crewai import Agent, Task, Crew, Process
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Import shared configurations
-from app.config import GOOGLE_API_KEY, GEMINI_MODEL_NAME
+# Ensure app/config.py exists or environment variables are set
+try:
+    from app.config import GOOGLE_API_KEY, GEMINI_MODEL_NAME
+except ImportError:
+    GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+    GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL_NAME", "gemini-pro")
+    if not GOOGLE_API_KEY:
+        print("Warning: GOOGLE_API_KEY not found in app.config or environment variables.")
 
 logger = logging.getLogger(__name__)
+if not logger.handlers: # Basic logging if not configured elsewhere
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 # LLM Initialization
 gemini_llm_employment = None
@@ -16,37 +26,49 @@ if GOOGLE_API_KEY:
     try:
         gemini_llm_employment = ChatGoogleGenerativeAI(
             model=GEMINI_MODEL_NAME,
-            temperature=0.15, # Slightly lower temperature for more deterministic financial/date extraction
+            temperature=0.15, # Optimized for extraction
             google_api_key=GOOGLE_API_KEY,
         )
         logger.info(f"EmploymentVerificationCrew LLM initialized with model: {GEMINI_MODEL_NAME}")
     except Exception as e:
         logger.error(f"Failed to initialize LLM for EmploymentVerificationCrew ({GEMINI_MODEL_NAME}): {e}", exc_info=True)
-        gemini_llm_employment = None
 else:
     logger.critical("EMPLOYMENT_CREW: GOOGLE_API_KEY environment variable not set. LLM will not be available.")
 
-
-# Refined VERIFICATION_FIELDS based on client instructions and common needs.
-# 'Currently Employed Status' will be derived by the agent.
-# 'Bonus Amount' is added to assist with salary calculations.
+# Canonical VERIFICATION_FIELDS based on client's requirements
 VERIFICATION_FIELDS = [
-    "Applicant Name",           # To cross-verify the document pertains to the applicant
-    "Company Name",             # SF: Company_Name__c on Affiliation
-    "Designation/Job Title",    # SF: Designation_Name__c on Affiliation
-    "Start Date",               # SF: Start_Date_Formula__c on Affiliation
-    "End Date",                 # SF: End_Date_Formula__c on Affiliation
-    "Currently Employed Status",# Derived: Yes/No/Unclear
-    "Salary Amount (Gross)",    # SF: Compensation_End_Amount__c on Affiliation (assumed annual)
-    "Salary Currency",          # Extracted from document
-    "Salary Frequency",         # Extracted from document (e.g., Monthly, Annual, Weekly)
-    "Bonus Amount (if specified separately)" # Extracted from document
+    "Applicant Name",
+    "Company Name",
+    "Employment Designation",
+    "Start Date",
+    "End Date",
+    "Compensation",
 ]
+
+# Mapping from potential Salesforce Apex field names to canonical VERIFICATION_FIELDS names
+SALESFORCE_TO_CANONICAL_FIELD_MAP = {
+    "applicantName": "Applicant Name",
+    "employerName": "Company Name",
+    "jobTitle": "Employment Designation",
+    "startDate": "Start Date",
+    "endDate": "End Date",
+    "compensation": "Compensation",
+    # Add direct mappings if some SF keys might already match canonical names
+    "Applicant Name": "Applicant Name",
+    "Company Name": "Company Name",
+    "Employment Designation": "Employment Designation",
+    "Start Date": "Start Date",
+    "End Date": "End Date",
+    "Compensation": "Compensation",
+}
 
 class EmploymentVerificationAgents:
     def data_comparator_agent(self) -> Agent:
         if not gemini_llm_employment:
             raise RuntimeError("LLM for EmploymentVerificationAgents not initialized. Cannot create agent.")
+        
+        field_list_str = ", ".join([f"'{field}'" for field in VERIFICATION_FIELDS])
+        
         return Agent(
             role="Expert Employment & Compensation Verification Analyst",
             goal=(
@@ -54,41 +76,46 @@ class EmploymentVerificationAgents:
                 "1. Structured Salesforce record data (JSON string from an Affiliation object, detailing one employment). "
                 "2. Raw text from a supporting employment document (e.g., offer letter, experience letter, payslip, relieving letter, ITR, Form16). "
                 "Your multi-step goal is to: "
-                "  a. From the document text, meticulously extract values for the predefined fields: "
-                f"     `{', '.join(VERIFICATION_FIELDS)}`. Apply nuanced understanding for variations. "
-                "     If a value is not explicitly found, use 'Not Found in Document'. "
-                "  b. For 'Currently Employed Status', infer 'Yes' if End Date implies ongoing employment (e.g., 'Present', document date is recent and role is current) or if no end date is mentioned in a context suggesting current employment. Infer 'No' if a clear past End Date is found. Otherwise, 'Unclear'. "
-                "  c. Apply specific client rules and human-like intuition during extraction and comparison: "
-                "     - **Applicant Name**: Verify if the name on the document closely matches the expected applicant's name (usually part of the SF record or context). Note any variations. "
-                "     - **Company Name**: "
-                "         - Match should be positive for variations like 'PwC India' vs. 'India Pricewaterhouse&Co' or 'Accordion (formerly known as Merilytics)' vs. 'ACCORDION PARTNERS INDIA PRIVATE LIMITED'. Handle common legal suffixes (Pvt Ltd, Inc., LLC, Limited). Status 'Matched' or 'Partially Mat हम (Acceptable Variation)' with notes. "
-                "     - **Designation/Job Title**: "
+                f"  a. From the document text, meticulously extract values for ONLY the predefined fields: {field_list_str}. "
+                "     Apply nuanced understanding for variations. If a value is not explicitly found for a predefined field, its 'document_value' must be 'Not Found in Document'. "
+                "  b. For each predefined field, compare its extracted document value against the corresponding Salesforce record value, applying specific client rules and human-like intuition: "
+                "     - **'Applicant Name'**: Verify if the name on the document closely matches the applicant's name from the Salesforce record. Note any variations. "
+                "     - **'Company Name'**: "
+                "         - Match should be positive for variations like 'PwC India' vs. 'India Pricewaterhouse&Co' or 'Accordion (formerly known as Merilytics)' vs. 'ACCORDION PARTNERS INDIA PRIVATE LIMITED'. Handle common legal suffixes (Pvt Ltd, Inc., LLC, Limited). Status 'Matched' or 'Partially Matched (Acceptable Variation)' with notes. "
+                "     - **'Employment Designation'**: "
                 "         - Aim for exact match (e.g., 'Associate' = 'Associate'). Status 'Matched'. "
                 "         - Different distinct roles are 'Mismatched' (e.g., 'Software Test Engineer' vs 'Functional Test Engineer'). "
                 "         - Minor variations or clear hierarchical/synonymous terms (e.g. 'Sr. Developer' vs 'Senior Software Engineer') can be 'Partially Matched (Acceptable Variation)'. "
-                "     - **Dates (Start Date, End Date)**: "
-                "         - Handle YYYY-MM-DD, YYYY-MM, Month YYYY (e.g., '07' or 'July'). "
-                "         - If End Date in document implies ongoing ('Present', 'Till Date', current date on payslip) and Salesforce record has no End Date, this is 'Matched' for 'Currently Employed Status' and 'Implied Match (Ongoing)' for 'End Date' field itself. "
-                "         - If Year/Month match but day differs, or one source has day and other doesn't, status 'Partially Matched (Detail Variance)'. "
-                "     - **Salary (Amount, Currency, Frequency) & Bonus**: "
-                "         - Extract Gross Salary Amount, its Currency (map symbols like ₹ to INR, $ to USD), and Frequency (Weekly, Monthly, Annually from cues like 'p.m.', 'p.a.'). Extract any separately mentioned Bonus Amount. "
-                "         - The Salesforce 'Salary Amount (Gross)' is assumed to be ANNUAL. "
+                "     - **'Start Date', 'End Date'**: "
+                "         - Extract dates, aiming for 'YYYY-MM-DD' format. Handle common variations (e.g., DD-MMM-YYYY, Month DD, YYYY, YYYY-MM). Note original format if ambiguous. "
+                "         - **For 'End Date' specifically**: "
+                "           - If the Salesforce record 'End Date' is null or 'Not Provided in Record' (implying current employment in SF): "
+                "             - If your extracted 'document_value' for 'End Date' also implies ongoing employment (e.g., is 'Present', 'Till Date', or 'Not Found in Document' because the document is a recent payslip with no end date), then the status for 'End Date' is 'Implied Match (Ongoing)'. Notes must clarify this (e.g., 'Both record and document suggest current employment.')."
+                "             - If the document explicitly provides a past 'End Date', this is a 'Mismatched' status. Note the discrepancy against the record's implication of ongoing employment."
+                "           - If the Salesforce record 'End Date' is a specific date: "
+                "             - If your extracted 'document_value' for 'End Date' implies ongoing employment, this is 'Mismatched'."
+                "             - If the 'document_value' for 'End Date' is also a specific date, compare them. Exact matches are 'Matched'. If Year/Month match but day differs, or one source has day and other doesn't, status is 'Partially Matched (Detail Variance)'. Significant differences are 'Mismatched'."
+                "             - If the 'document_value' for 'End Date' is 'Not Found in Document', and the SF record specifies an end date, status is 'Found in Record Only'."
+                "     - **'Compensation'**: "
+                "         - From the document, extract Gross Salary Amount, its Currency (map symbols like ₹ to INR, $ to USD), and Frequency (Weekly, Monthly, Annually from cues like 'p.m.', 'p.a.'). Also extract any separately mentioned Bonus Amount from the document (and its frequency, e.g., annual, one-time). "
+                "         - The Salesforce 'Compensation' value (if present) is assumed to be ANNUAL. "
                 "         - **Calculation for Comparison**: Convert document salary to an ANNUAL figure. "
-                "           - If document frequency is Monthly: (Document Monthly Gross * 12) + Document Annual Bonus (if any, or annualized monthly bonus). "
-                "           - If document frequency is Weekly: (Document Weekly Gross * 52) + Document Annual Bonus (if any). "
-                "           - If document frequency is Annual: Use Document Annual Gross + Document Annual Bonus (if any). "
-                "         - **Comparison & Status**: Compare this calculated Annual Document Salary with the Annual Salesforce Salary. "
-                "           - If they match exactly or are within a **20% variation**, status is 'Matched'. Note the calculated values and percentage difference if not exact. "
-                "           - If outside 20% variation, status is 'Mismatched'. Note calculated values and percentage difference. "
-                "           - If currency in document differs from implied currency of SF record (assume local if not specified), it's 'Mismatched', even if numbers are close. Note both currencies. "
-                "           - If frequency cannot be determined from the document, status is 'Needs Human Review' for salary, note available figures. "
-                "  d. For each predefined field, create a JSON object detailing: 'field_name', 'record_value' (from SF JSON, use 'Not Provided in Record' if missing/null), 'document_value' (your extraction/derivation), "
+                "           - If document frequency is Monthly: (Document Monthly Gross * 12) + Total Annualized Document Bonus (if any). "
+                "           - If document frequency is Weekly: (Document Weekly Gross * 52) + Total Annualized Document Bonus (if any). "
+                "           - If document frequency is Annual: Document Annual Gross + Total Annualized Document Bonus (if any). "
+                "         - **Comparison & Status**: Compare this calculated Annual Document Salary with the Annual Salesforce Compensation. "
+                "           - If they match exactly OR the calculated Annual Document Salary is within a **20% variation** (i.e., between 80% and 120%) of the Annual Salesforce Compensation, the status is **'Matched'**. Note the calculated values and the exact percentage difference if not an exact match. "
+                "           - If the difference is outside the 20% variation, the status is **'Mismatched'**. Note calculated values and the percentage difference. "
+                "           - If the currency extracted from the document differs from the implied currency of the SF record (assume local currency if not specified in SF record), status is 'Mismatched', even if numbers are close. Note both currencies. "
+                "           - If compensation frequency cannot be reliably determined from the document to perform annualization, status is 'Needs Human Review' for 'Compensation'. Note any figures or partial information found. "
+                "  c. For each of the **predefined fields** ({field_list_str}), create a JSON object detailing: 'field_name', 'record_value' (from SF JSON, use 'Not Provided in Record' if missing/null for that predefined field), 'document_value' (your extraction/derivation for that predefined field), "
                 "     'status' ('Matched', 'Mismatched', 'Partially Matched (Acceptable Variation)', 'Partially Matched (Detail Variance)', 'Implied Match (Ongoing)', 'Found in Record Only', 'Found in Document Only', 'Not Found in Either', 'Needs Human Review'), "
-                "     'confidence' (High, Medium, Low), 'notes' (CRUCIAL: explain status, variations, calculations performed, rules applied, missing info, or why it 'Needs Human Review'). "
-                "Output a single, valid JSON array string of these comparison objects."
+                "     'confidence' (High, Medium, Low), 'notes' (CRUCIAL: explain status, variations, calculations performed for Compensation, rules applied, missing info, or why it 'Needs Human Review'). "
+                "     - Use 'Matched' status only when both record and document provide comparable values that align per rules. If 'record_value' is 'Not Provided in Record' or null, and 'document_value' is found, the status must be 'Found in Document Only'. If 'document_value' is 'Not Found in Document' and 'record_value' exists, use 'Found in Record Only'."
+                "Output a single, valid JSON array string containing objects **ONLY for these predefined comparison fields**."
             ),
             backstory=(
-                "You are an AI system with deep expertise in verifying employment and compensation details from diverse documentation. You meticulously apply client-specific rules for matching company names, designations, dates, and complex salary calculations including bonuses and acceptable variations. Your structured output is vital for due diligence."
+                "You are an AI system with deep expertise in verifying employment and compensation details from diverse documentation. You meticulously apply client-specific rules for matching company names, employment designations, dates (including nuanced handling of ongoing employment), and complex compensation calculations involving annualization, bonuses, and a 20% acceptable variation threshold. Your structured output, strictly limited to predefined fields, is vital for due diligence."
             ),
             llm=gemini_llm_employment,
             verbose=True,
@@ -96,25 +123,25 @@ class EmploymentVerificationAgents:
         )
 
     def final_report_generator_agent(self) -> Agent:
+        # This agent's definition remains the same as provided in the problem
         if not gemini_llm_employment:
             raise RuntimeError("LLM for EmploymentVerificationAgents not initialized. Cannot create agent.")
         return Agent(
             role="Insightful Employment Verification Report Finalizer",
             goal=(
-                "You will receive a JSON array string detailing field-by-field comparisons for employment verification. "
+                "You will receive a JSON array string detailing field-by-field comparisons for employment verification. The field names in this JSON are the canonical names. "
                 "Format this into a single, human-readable string report starting with 'Employment Verification Details:'. "
-                "List each field's comparison clearly. "
+                "List each field's comparison clearly, using the 'field_name' from the JSON for display. "
                 "After the field-by-field breakdown, provide a concise 1-2 line 'Overall Feedback'. "
                 "This feedback must intelligently summarize the verification outcome, focusing on CRITICAL discrepancies "
-                "(e.g., 'Mismatched' Company Name, 'Mismatched' Designation if roles are fundamentally different, "
-                "substantial differences in Start/End Dates affecting tenure, major Salary disparities beyond the 20% acceptable variation, "
-                "or if 'Currently Employed Status' is 'Mismatched'). "
-                "Also highlight if 'Needs Human Review' status appears for critical fields like Salary. "
+                "(e.g., 'Mismatched' 'Company Name', 'Mismatched' 'Employment Designation' if roles are fundamentally different, "
+                "substantial differences in 'Start Date'/'End Date' affecting tenure, major 'Compensation' disparities beyond the 20% acceptable variation). "
+                "Also highlight if 'Needs Human Review' status appears for critical fields like 'Compensation'. "
                 "Downplay 'Partially Matched (Acceptable Variation)' or 'Partially Matched (Detail Variance)' statuses if notes indicate reasonable explanations. "
                 "The feedback should reflect a human-like assessment of whether the document substantially supports the employment claims on record."
             ),
             backstory=(
-                "You are a skilled report writer who synthesizes complex employment verification data into clear, actionable summaries. You focus on materiality and the overall picture of an employment claim's veracity based on predefined rules including acceptable salary variations."
+                "You are a skilled report writer who synthesizes complex employment verification data into clear, actionable summaries. You focus on materiality and the overall picture of an employment claim's veracity based on predefined rules including acceptable compensation variations."
             ),
             llm=gemini_llm_employment,
             verbose=True,
@@ -123,79 +150,85 @@ class EmploymentVerificationAgents:
 
 class EmploymentVerificationTasks:
     def compare_data_and_output_json_task(self, agent: Agent, salesforce_record_data_json_str: str, document_text: str) -> Task:
-        field_list_str = ", ".join(VERIFICATION_FIELDS)
+        # This task's description remains largely the same, as the core logic is in the agent's goal.
+        field_list_str = ", ".join([f"'{field}'" for field in VERIFICATION_FIELDS])
         return Task(
             description=(
                 "Perform a detailed verification of employment information. You are given Salesforce record data (from an Affiliation object representing one employment) and raw text from a supporting document (like an offer letter, experience letter, payslip, ITR, or Form 16).\n\n"
-                f"**Predefined Fields for Verification & Extraction from Document:**\n`{field_list_str}`\n\n"
-                f"**Salesforce Record Data (JSON String - Affiliation Details):**\n```json\n{salesforce_record_data_json_str}\n```\n"
-                f"This Salesforce data typically includes fields like 'Company Name', 'Designation/Job Title', 'Start Date', 'End Date', and an ANNUAL 'Salary Amount (Gross)'.\n\n"
+                f"**Predefined Fields for Verification & Extraction from Document (these are the ONLY fields you should output):**\n`{field_list_str}`\n\n"
+                f"**Salesforce Record Data (JSON String - Affiliation Details, values mapped to canonical field names):**\n```json\n{salesforce_record_data_json_str}\n```\n"
+                f"This Salesforce data uses canonical field names and includes an ANNUAL 'Compensation' if present.\n\n"
                 f"**Document Text (Raw):**\n```text\n{document_text}\n```\n\n"
-                "**Your Mandated Process & Client Rules:**\n"
-                "1.  **Extract from Document Text**: For each predefined field, extract its value from the 'Document Text'. If not found, state 'Not Found in Document'.\n"
-                "    - **Applicant Name**: Cross-verify with applicant's expected name.\n"
-                "    - **Company Name**: Crucially, match variations like 'PwC India' with 'India Pricewaterhouse&Co' or 'Accordion (formerly known as Merilytics)' with 'ACCORDION PARTNERS INDIA PRIVATE LIMITED'. Note such equivalent matches.\n"
-                "    - **Designation/Job Title**: 'Associate' must match 'Associate'. 'Software Test Engineer' is a MISMATCH to 'Functional Test Engineer' if they are distinct roles. Minor synonyms are 'Partially Matched (Acceptable Variation)'.\n"
-                "    - **Start Date / End Date**: Handle formats like YYYY-MM-DD, YYYY-MM, or Month YYYY (e.g., '07' or 'July').\n"
-                "    - **Currently Employed Status**: Infer 'Yes' if End Date is 'Present', 'Till Date', or document context (e.g., recent payslip for current role) implies ongoing. Infer 'No' for clear past End Date. Otherwise 'Unclear'.\n"
-                "    - **Salary & Bonus**: From the document, extract Gross Salary Amount, Currency (map ₹ to INR, $ to USD etc.), and Frequency (Weekly, Monthly, Annual). Also extract any separately mentioned Bonus Amount (annual or otherwise).\n"
-                "2.  **Salary Comparison (Critical)**:\n"
-                "    a.  The 'Salary Amount (Gross)' from the Salesforce record is assumed to be an ANNUAL figure.\n"
-                "    b.  Calculate Total Annual Document Salary: \n"
-                "        - If doc frequency is Monthly: (Doc Monthly Gross * 12) + Total Annualized Bonus from Doc (if any).\n"
-                "        - If doc frequency is Weekly: (Doc Weekly Gross * 52) + Total Annualized Bonus from Doc (if any).\n"
-                "        - If doc frequency is Annual: Doc Annual Gross + Total Annualized Bonus from Doc (if any).\n"
-                "    c.  Compare this Calculated Annual Document Salary with the Annual Salesforce Salary.\n"
-                "    d.  **20% Variation Rule**: If the Calculated Annual Document Salary is within a 20% difference (higher or lower) of the Annual Salesforce Salary, the status for 'Salary Amount (Gross)' is 'Matched'. Note the percentage difference.\n"
-                "    e.  If the difference is > 20%, the status is 'Mismatched'. Note the percentage difference.\n"
-                "    f.  If document currency differs from the implied currency of the SF record, salary status is 'Mismatched' (note both currencies).\n"
-                "    g.  If salary frequency cannot be determined from the document to perform annualization, set salary status to 'Needs Human Review' and provide any figures found.\n"
-                "3.  **Structure Output**: For EACH predefined field, create a JSON object: {'field_name', 'record_value', 'document_value', 'status', 'confidence', 'notes'}. 'record_value' should be 'Not Provided in Record' if missing. 'status' options: 'Matched', 'Mismatched', 'Partially Matched (Acceptable Variation)', 'Partially Matched (Detail Variance)', 'Implied Match (Ongoing)', 'Found in Record Only', 'Found in Document Only', 'Not Found in Either', 'Needs Human Review'. 'notes' MUST explain the status, especially for salary calculations, variations, company name equivalencies, and date interpretations.\n\n"
-                "**Final Output Requirement**: A single, valid JSON array string of these structured comparison objects, adhering to all rules."
+                "**Your Mandated Process & Client Rules (refer to your detailed role and goal for specifics on each field, especially 'End Date' and 'Compensation' including the 20% variation rule and annualization logic):**\n"
+                "1.  **Extract from Document Text**: For each predefined field, extract its value. If not found, state 'Not Found in Document'.\n"
+                "2.  **Compare and Determine Status**: Compare document values with record values using all specified rules.\n"
+                "3.  **Structure Output**: For EACH predefined field ONLY, create a JSON object: {'field_name', 'record_value', 'document_value', 'status', 'confidence', 'notes'}.\n\n"
+                "**Final Output Requirement**: A single, valid JSON array string of these structured comparison objects for the predefined fields ONLY, adhering to all rules."
             ),
             agent=agent,
             expected_output=(
                 "A valid JSON array string. Each object details a field's comparison: "
                 "'field_name', 'record_value', 'document_value', 'status', 'confidence', 'notes'. "
-                "Salary comparison must adhere to the 20% variation rule and annualization logic."
+                "Output MUST ONLY contain objects for the predefined VERIFICATION_FIELDS. "
+                "Compensation comparison must adhere to the 20% variation rule and annualization logic. "
+                "End Date logic must correctly handle ongoing employment scenarios."
             )
         )
 
     def generate_formatted_report_task(self, agent: Agent, context_tasks: list) -> Task:
+        # This task's definition remains the same.
         return Task(
             description=(
-                "You have received a JSON array string (from the context of a previous task) which contains detailed field-by-field comparisons of employment data including complex salary analysis based on client rules (like 20% variation acceptability). "
-                "Each object in this array includes 'field_name', 'record_value', 'document_value', 'status', 'confidence', and 'notes'.\n\n"
+                "You have received a JSON array string (from the context of a previous task) which contains detailed field-by-field comparisons of employment data including complex compensation analysis based on client rules (like 20% variation acceptability). "
+                "Each object in this array includes 'field_name', 'record_value', 'document_value', 'status', 'confidence', and 'notes'. The 'field_name' is the canonical name.\n\n"
                 "Your task is to transform this JSON array into a single, human-readable string report. The report must start with the heading 'Employment Verification Details:'.\n"
-                "Following this heading, for each field comparison object from the JSON array, list the information in this format:\n"
+                "Following this heading, for each field comparison object from the JSON array, list the information in this format, using the 'field_name' from the JSON for display:\n"
                 "- Field: [field_name]\n"
                 "  Record Value: [record_value]\n"
                 "  Document Value: [document_value]\n"
                 "  Status: [status] (Confidence: [confidence])\n"
                 "  Notes: [notes]\n\n"
                 "After detailing all fields, provide a concise 'Overall Feedback' section of 1-2 lines. This feedback should be an intelligent summary of the verification. "
-                "Focus on critical discrepancies, such as: 'Mismatched' Company Name (after applying equivalence rules), significantly different employment tenures implied by Start/End Dates, "
-                "Salary Amounts that are 'Mismatched' (i.e., outside the 20% acceptable variation after annualization and bonus considerations), "
-                "fundamentally different job titles, or a 'Mismatched' 'Currently Employed Status'. "
-                "Also, explicitly mention if 'Salary Amount (Gross)' or other key fields have a status of 'Needs Human Review'. "
+                "Focus on critical discrepancies, such as: 'Mismatched' 'Company Name' (after applying equivalence rules), significantly different employment tenures implied by 'Start Date'/'End Date', "
+                "'Compensation' amounts that are 'Mismatched' (i.e., outside the 20% acceptable variation after annualization and bonus considerations), "
+                "fundamentally different 'Employment Designation'. "
+                "Also, explicitly mention if 'Compensation' or other key fields have a status of 'Needs Human Review'. "
                 "If 'Partially Matched' statuses are due to acceptable variations clearly explained in the notes (like salary frequency conversion resulting in a 'Matched' status due to the 20% rule, or minor name tweaks for known company aliases), these should not be the primary focus of a negative overall feedback unless they collectively indicate a larger issue. "
                 "The feedback's aim is to give a human-like assessment of whether the provided document substantially supports the key employment claims found in the Salesforce record, considering all client-specified rules."
             ),
             agent=agent,
             context=context_tasks,
             expected_output=(
-                "A single string containing the 'Employment Verification Details:' section with a clear, field-by-field breakdown, "
-                "followed by a concise 'Overall Feedback:' (1-2 lines) summarizing the findings, explicitly considering the 20% salary variation rule and other client instructions."
+                "A single string containing the 'Employment Verification Details:' section with a clear, field-by-field breakdown using canonical field names, "
+                "followed by a concise 'Overall Feedback:' (1-2 lines) summarizing the findings, explicitly considering the 20% compensation variation rule and other client instructions."
             )
         )
 
 class EmploymentVerificationCrewOrchestrator:
     def __init__(self, record_data_dict: Dict[str, Any], document_text: str):
-        self.salesforce_record_data_json_str = json.dumps(record_data_dict, indent=2)
+        processed_record_data = {}
+        # First, create a temporary dictionary with keys mapped to canonical names
+        temp_mapped_data = {}
+        for sf_key, value in record_data_dict.items():
+            canonical_key = SALESFORCE_TO_CANONICAL_FIELD_MAP.get(sf_key)
+            if canonical_key: # If a mapping exists for the Salesforce key
+                temp_mapped_data[canonical_key] = value
+            elif sf_key in VERIFICATION_FIELDS: # If the Salesforce key is already a canonical name
+                temp_mapped_data[sf_key] = value
+            # else:
+                # logger.debug(f"Salesforce key '{sf_key}' not in direct map or VERIFICATION_FIELDS, will be ignored for processed_record_data.")
+
+        # Ensure all VERIFICATION_FIELDS are present in processed_record_data, even if with None
+        for field in VERIFICATION_FIELDS:
+            processed_record_data[field] = temp_mapped_data.get(field) # Get by canonical name, defaults to None if not found
+
+        self.salesforce_record_data_json_str = json.dumps(processed_record_data, indent=2)
         self.document_text = document_text
         self.agents_provider = EmploymentVerificationAgents()
         self.tasks_provider = EmploymentVerificationTasks()
-        logger.info(f"EmploymentVerificationCrewOrchestrator initialized. Document text length: {len(document_text)}.")
+        logger.info(f"EmploymentVerificationCrewOrchestrator initialized. SF Fields for agent: {list(processed_record_data.keys())}. Document text length: {len(document_text)}.")
+        # logger.debug(f"Processed Salesforce Record for Agent: {self.salesforce_record_data_json_str}")
+
 
     def run(self) -> str:
         if not gemini_llm_employment:
@@ -227,6 +260,17 @@ class EmploymentVerificationCrewOrchestrator:
             
             logger.info(f"EmploymentVerificationCrew execution completed. Report length: {len(final_report_string if final_report_string else '')}")
             
+            # Check for duplicate overall feedback - simple check for now
+            if final_report_string:
+                overall_feedback_sentinel = "Overall Feedback:"
+                if final_report_string.count(overall_feedback_sentinel) > 1:
+                    logger.warning("Duplicate 'Overall Feedback' detected in the report. Attempting to consolidate.")
+                    parts = final_report_string.split(overall_feedback_sentinel)
+                    if len(parts) > 1: # Should always be true if count > 1
+                        # Keep the first part (details) and the first overall feedback
+                        final_report_string = parts[0] + overall_feedback_sentinel + parts[1].strip()
+
+
             if not final_report_string or not isinstance(final_report_string, str):
                 logger.error(f"EmploymentVerificationCrew produced an invalid or empty report. Type: {type(final_report_string)}")
                 raw_output_str = str(final_report_string) if final_report_string is not None else "None"

@@ -5,18 +5,19 @@ from simple_salesforce import Salesforce, SalesforceAuthenticationFailed, Salesf
 import requests
 from typing import Tuple, List, Dict, Any, Optional
 
-from fastapi import HTTPException, Depends # For dependency injection
+from fastapi import HTTPException, Depends
 
 # Import configurations from app.config
 from app.config import (
     SALESFORCE_USERNAME, SALESFORCE_PASSWORD, SALESFORCE_SECURITY_TOKEN,
     SALESFORCE_DOMAIN, SALESFORCE_INSTANCE_URL, SALESFORCE_AUTH_MODE,
     SALESFORCE_CLIENT_ID, SALESFORCE_CLIENT_SECRET, SALESFORCE_TOKEN_URL,
-    APEX_ENDPOINT_PATHS, # This is now a Dict directly from config
-    APPLICATION_OBJECT_API_NAME, APPLICATION_ANALYSIS_REPORT_FIELD,
-    EDUCATION_HISTORY_OBJECT_API_NAME, EDUCATION_HISTORY_ANALYSIS_REPORT_FIELD,
-    TEST_SCORE_OBJECT_API_NAME, TEST_SCORE_ANALYSIS_REPORT_FIELD,
-    ISB_EMPLOYMENT_LOG_OBJECT_API_NAME, EMPLOYMENT_LOG_ANALYSIS_REPORT_FIELD # NEW
+    APEX_ENDPOINT_PATHS,
+    # Import new AVS object and field names
+    APPLICATION_VERIFICATION_SUMMARY_OBJECT_API_NAME,
+    AVS_APPLICATION_LOOKUP_FIELD, AVS_CONTACT_LOOKUP_FIELD,
+    AVS_EDUCATION_HISTORY_LOOKUP_FIELD, AVS_TEST_LOOKUP_FIELD,
+    AVS_AFFILIATION_LOOKUP_FIELD, AVS_REPORT_FIELD, AVS_NAME_FIELD
 )
 
 logger = logging.getLogger(__name__)
@@ -26,23 +27,10 @@ class SalesforceService:
         self.sf: Optional[Salesforce] = None
         self.instance_url: Optional[str] = None
         self.auth_mode: str = SALESFORCE_AUTH_MODE
-
-        # Map SObject API names to their respective analysis report field API names.
-        # This is used by update_record_analysis_report.
-        # The key is the API name of the SObject WHERE THE REPORT FIELD EXISTS.
-        self.analysis_report_field_map: Dict[str, str] = {
-            APPLICATION_OBJECT_API_NAME: APPLICATION_ANALYSIS_REPORT_FIELD,
-            EDUCATION_HISTORY_OBJECT_API_NAME: EDUCATION_HISTORY_ANALYSIS_REPORT_FIELD,
-            TEST_SCORE_OBJECT_API_NAME: TEST_SCORE_ANALYSIS_REPORT_FIELD,
-            ISB_EMPLOYMENT_LOG_OBJECT_API_NAME: EMPLOYMENT_LOG_ANALYSIS_REPORT_FIELD, # NEW
-        }
         
-        # APEX_ENDPOINT_PATHS is already a dict from config.py.
-        # Keys in this map are used by get_record_detail_from_apex to construct the endpoint URL.
-        # The key should match what the processor passes as 'sobject_api_name_key'.
         self.apex_endpoint_path_map: Dict[str, str] = APEX_ENDPOINT_PATHS
 
-        self._connect() # Attempt connection on initialization
+        self._connect()
 
     def _connect(self):
         """Internal method to establish Salesforce connection."""
@@ -130,9 +118,6 @@ class SalesforceService:
     def get_record_detail_from_apex(self, record_id: str, sobject_api_name_key: str) -> Optional[Dict[str, Any]]:
         """
         Calls the Apex REST endpoint to get record details.
-        The 'sobject_api_name_key' must be a key in self.apex_endpoint_path_map (from config.APEX_ENDPOINT_PATHS).
-        For employment, this key will be ISB_EMPLOYMENT_LOG_OBJECT_API_NAME, and the record_id will be the
-        ISB_Employment_Log__c ID. The Apex endpoint will handle fetching related Affiliation data.
         """
         self._ensure_connected()
         if not (isinstance(record_id, str) and (len(record_id) == 15 or len(record_id) == 18)):
@@ -145,11 +130,13 @@ class SalesforceService:
             return None
 
         apex_rest_path = f"/services/apexrest/{endpoint_path_segment.strip('/')}/{record_id}"
-        full_url = f"https://{self.instance_url.strip('/')}{apex_rest_path}"
+        base_instance_url = self.instance_url.strip('/') if self.instance_url else '' # type: ignore
+        full_url = f"https://{base_instance_url}{apex_rest_path}"
+
 
         logger.info(f"Calling Apex REST: POST {full_url} for SObject key '{sobject_api_name_key}' with ID {record_id}")
         try:
-            response = self.sf.session.post(full_url, headers=self.sf.headers, json={}, timeout=60)
+            response = self.sf.session.post(full_url, headers=self.sf.headers, json={}, timeout=60) # type: ignore
 
             if 400 <= response.status_code < 600:
                 error_content = response.text
@@ -171,59 +158,127 @@ class SalesforceService:
         except requests.exceptions.RequestException as e:
             logger.error(f"Network error calling Apex for SObject key '{sobject_api_name_key}' ID {record_id}: {e}", exc_info=True)
             return None
-        except Exception as e:
+        except Exception as e: 
             logger.error(f"Unexpected error calling Apex for SObject key '{sobject_api_name_key}' ID {record_id}: {e}", exc_info=True)
             return None
 
     def update_record_analysis_report(self, record_id: str, sobject_api_name: str, report_content: str) -> bool:
         """
-        Updates the analysis report field on a given Salesforce record.
-        'sobject_api_name' is the API name of the SObject where the report field exists
-        (e.g., ISB_Employment_Log__c for employment reports).
+        DEPRECATED in favor of upsert_verification_summary.
         """
         self._ensure_connected()
-        if not (isinstance(record_id, str) and (len(record_id) == 15 or len(record_id) == 18)):
-            logger.error(f"Invalid Salesforce ID format for record_id: {record_id}")
+        logger.warning(f"DEPRECATED: update_record_analysis_report called for {sobject_api_name} ID {record_id}. Please use upsert_verification_summary.")
+        logger.error(f"Direct update on {sobject_api_name} via update_record_analysis_report is disabled. Use upsert_verification_summary to update {APPLICATION_VERIFICATION_SUMMARY_OBJECT_API_NAME}.")
+        return False
+
+
+    def upsert_verification_summary(
+        self,
+        application_id: str,
+        report_content: str,
+        name_value: str,
+        contact_id: Optional[str] = None,
+        education_history_id: Optional[str] = None,
+        test_id: Optional[str] = None,
+        affiliation_id: Optional[str] = None
+    ) -> bool:
+        """
+        Creates or updates an Application_Verification_Summary__c record.
+        """
+        self._ensure_connected()
+        if not self.sf:
+            logger.error("Salesforce connection not available for upsert_verification_summary.")
             return False
 
-        report_field_api_name = self.analysis_report_field_map.get(sobject_api_name)
-        if not report_field_api_name:
-            logger.error(f"No analysis report field configured for SObject API name: {sobject_api_name} in analysis_report_field_map.")
-            return False
+        summary_object_name = APPLICATION_VERIFICATION_SUMMARY_OBJECT_API_NAME
+        
+        application_id_soql = f"'{application_id}'"
+        
+        soql_query = f"SELECT Id FROM {summary_object_name} WHERE {AVS_APPLICATION_LOOKUP_FIELD} = {application_id_soql}"
+        
+        secondary_lookup_field: Optional[str] = None
+        secondary_lookup_id_soql: Optional[str] = None
+        secondary_lookup_id_value: Optional[str] = None
 
-        sObject_type_instance = getattr(self.sf, sobject_api_name, None)
-        if sObject_type_instance is None:
-            logger.error(f"SObject type '{sobject_api_name}' not found in Salesforce instance via simple_salesforce. Cannot update.")
-            return False
 
-        update_payload = {report_field_api_name: report_content}
-        logger.info(f"Attempting to update {sobject_api_name} ID {record_id} field '{report_field_api_name}'.")
+        if contact_id:
+            secondary_lookup_id_soql = f"'{contact_id}'"
+            soql_query += f" AND {AVS_CONTACT_LOOKUP_FIELD} = {secondary_lookup_id_soql}"
+            secondary_lookup_field = AVS_CONTACT_LOOKUP_FIELD
+            secondary_lookup_id_value = contact_id
+        elif education_history_id:
+            secondary_lookup_id_soql = f"'{education_history_id}'"
+            soql_query += f" AND {AVS_EDUCATION_HISTORY_LOOKUP_FIELD} = {secondary_lookup_id_soql}"
+            secondary_lookup_field = AVS_EDUCATION_HISTORY_LOOKUP_FIELD
+            secondary_lookup_id_value = education_history_id
+        elif test_id:
+            secondary_lookup_id_soql = f"'{test_id}'"
+            soql_query += f" AND {AVS_TEST_LOOKUP_FIELD} = {secondary_lookup_id_soql}"
+            secondary_lookup_field = AVS_TEST_LOOKUP_FIELD
+            secondary_lookup_id_value = test_id
+        elif affiliation_id:
+            secondary_lookup_id_soql = f"'{affiliation_id}'"
+            soql_query += f" AND {AVS_AFFILIATION_LOOKUP_FIELD} = {secondary_lookup_id_soql}"
+            secondary_lookup_field = AVS_AFFILIATION_LOOKUP_FIELD
+            secondary_lookup_id_value = affiliation_id
+        else:
+            logger.error(f"No secondary ID (Contact, Education, Test, Affiliation) provided for Application {application_id} to find/create {summary_object_name}.")
+            return False
+        
+        soql_query += " LIMIT 1"
+        logger.info(f"Querying for existing {summary_object_name}: {soql_query}")
+
         try:
-            status_code = sObject_type_instance.update(record_id, update_payload)
-            if status_code == 204:
-                logger.info(f"Successfully updated {sobject_api_name} ID {record_id}.")
-                return True
-            else:
-                response_content = "No detailed response content."
-                if self.sf.session.last_response:
-                    try:
-                        response_content = self.sf.session.last_response.json()
-                    except Exception:
-                        response_content = self.sf.session.last_response.text
-                logger.warning(f"Update for {sobject_api_name} ID {record_id} returned status {status_code}. Response: {response_content}")
+            # Get the SObject type instance dynamically
+            sobject_handler = getattr(self.sf, summary_object_name, None)
+            if sobject_handler is None:
+                logger.error(f"SObject type '{summary_object_name}' not found in Salesforce instance. Cannot upsert.")
                 return False
-        except SalesforceResourceNotFound:
-            logger.error(f"{sobject_api_name} record with ID '{record_id}' not found for update.")
-            return False
+
+            result = self.sf.query(soql_query) # type: ignore
+            payload = {
+                AVS_REPORT_FIELD: report_content,
+                AVS_NAME_FIELD: name_value 
+            }
+
+            if result.get('totalSize', 0) > 0 and len(result.get('records', [])) > 0:
+                existing_summary_id = result['records'][0]['Id']
+                logger.info(f"Found existing {summary_object_name} ID {existing_summary_id}. Updating report and name.")
+                # Use the dynamic sobject_handler for update
+                update_status_code = sobject_handler.update(existing_summary_id, payload)
+                if update_status_code == 204: # HTTP 204 No Content indicates success for update
+                    logger.info(f"Successfully updated {summary_object_name} ID {existing_summary_id}.")
+                else:
+                    logger.error(f"Failed to update {summary_object_name} ID {existing_summary_id}. Status code: {update_status_code}")
+                    # You might want to inspect self.sf.session.last_response here for more details if available
+                    return False
+            else:
+                logger.info(f"No existing {summary_object_name} found for Application {application_id} and secondary ID. Creating new record.")
+                payload[AVS_APPLICATION_LOOKUP_FIELD] = application_id
+                if secondary_lookup_field and secondary_lookup_id_value:
+                    payload[secondary_lookup_field] = secondary_lookup_id_value
+                
+                # Use the dynamic sobject_handler for create
+                create_response = sobject_handler.create(payload)
+                if create_response.get('success'):
+                    logger.info(f"Successfully created new {summary_object_name} record with ID {create_response.get('id')}.")
+                else:
+                    logger.error(f"Failed to create new {summary_object_name}. Errors: {create_response.get('errors')}")
+                    return False
+            return True
+
         except SalesforceMalformedRequest as e:
-            err_content = e.content if hasattr(e, 'content') else str(e)
-            logger.error(f"Malformed request updating {sobject_api_name} ID {record_id}. Payload: {update_payload}. Error: {err_content}")
+            err_content = e.content if hasattr(e, 'content') and e.content else str(e)
+            logger.error(f"Malformed request during {summary_object_name} upsert. Query: {soql_query}. Error: {err_content}", exc_info=True)
             return False
-        except AttributeError as e:
-             logger.error(f"Could not perform update for '{sobject_api_name}'. It might not be a standard or correctly mapped SObject. Error: {e}")
-             return False
+        except SalesforceResourceNotFound as e:
+            logger.error(f"{summary_object_name} or related field not found. Error: {e}", exc_info=True)
+            return False
+        except AttributeError as ae: # Could happen if getattr fails or sf is None
+            logger.error(f"Attribute error during {summary_object_name} upsert, possibly SObject type not found or sf client issue: {ae}", exc_info=True)
+            return False
         except Exception as e:
-            logger.error(f"Error updating {sobject_api_name} ID {record_id}: {e}", exc_info=True)
+            logger.error(f"Error during {summary_object_name} upsert: {e}", exc_info=True)
             return False
 
     def get_directly_related_record_ids(
@@ -242,12 +297,13 @@ class SalesforceService:
         )
         logger.info(f"Executing SOQL for direct relation: {soql_query}")
         try:
-            result = self.sf.query_all(soql_query)
+            result = self.sf.query_all(soql_query) # type: ignore
             record_ids = [record['Id'] for record in result['records']]
             logger.info(f"Found {len(record_ids)} '{child_object_api_name}' records related to '{parent_object_api_name}' ID {parent_record_id}.")
             return record_ids
         except SalesforceMalformedRequest as e:
-            logger.error(f"Malformed SOQL (direct relation): {soql_query} - Error: {e.content if hasattr(e, 'content') else e}")
+            err_content = e.content if hasattr(e, 'content') and e.content else str(e)
+            logger.error(f"Malformed SOQL (direct relation): {soql_query} - Error: {err_content}")
             raise ValueError(f"SOQL query error. Check object/field names and permissions for {child_object_api_name} and {lookup_field_on_child_to_parent}.")
         except Exception as e:
             logger.error(f"Error fetching directly related '{child_object_api_name}' for Parent {parent_record_id} ({parent_object_api_name}): {e}", exc_info=True)
@@ -270,12 +326,13 @@ class SalesforceService:
         )
         logger.info(f"Executing SOQL via junction: {soql_query}")
         try:
-            result = self.sf.query_all(soql_query)
+            result = self.sf.query_all(soql_query) # type: ignore
             record_ids = [record[junction_field_to_target] for record in result['records'] if record[junction_field_to_target] is not None]
             logger.info(f"Found {len(record_ids)} target IDs via '{junction_object_api_name}' for '{parent_object_api_name}' ID {parent_record_id}.")
             return record_ids
         except SalesforceMalformedRequest as e:
-            logger.error(f"Malformed SOQL (junction): {soql_query} - Error: {e.content if hasattr(e, 'content') else e}")
+            err_content = e.content if hasattr(e, 'content') and e.content else str(e)
+            logger.error(f"Malformed SOQL (junction): {soql_query} - Error: {err_content}")
             raise ValueError(f"SOQL query error. Check object/field names and permissions for {junction_object_api_name}, {junction_field_to_parent}, {junction_field_to_target}.")
         except KeyError as e_key: 
             logger.error(f"Field '{junction_field_to_target}' not in query result from {junction_object_api_name}. Query: {soql_query}. Error: {e_key}")
@@ -285,7 +342,7 @@ class SalesforceService:
             raise RuntimeError(f"Failed to fetch target records via junction.")
 
 # --- FastAPI Dependency ---
-_sf_service_instance = None
+_sf_service_instance: Optional[SalesforceService] = None
 _sf_service_lock = asyncio.Lock()
 
 async def get_sf_service_dependency() -> SalesforceService:
@@ -296,11 +353,11 @@ async def get_sf_service_dependency() -> SalesforceService:
                 try:
                     logger.info("Initializing SalesforceService singleton for dependency...")
                     _sf_service_instance = SalesforceService()
-                    if not _sf_service_instance.instance_url:
+                    if not _sf_service_instance.instance_url: 
                          logger.error("SalesforceService initialized but instance_url is missing. Connection likely failed.")
                          _sf_service_instance = None 
                          raise HTTPException(status_code=503, detail="Salesforce Service unavailable: Connection failed, instance URL not set.")
-                    logger.info(f"SalesforceService singleton created. Instance URL: {_sf_service_instance.instance_url}")
+                    logger.info(f"SalesforceService singleton created. Instance URL: {_sf_service_instance.instance_url}") 
                 except (ValueError, SalesforceAuthenticationFailed) as e:
                     logger.error(f"Failed to initialize SalesforceService for dependency: {e}", exc_info=True)
                     _sf_service_instance = None
@@ -310,7 +367,7 @@ async def get_sf_service_dependency() -> SalesforceService:
                     _sf_service_instance = None
                     raise HTTPException(status_code=500, detail=f"Unexpected error initializing Salesforce Service: {str(e)}")
     try:
-        _sf_service_instance._ensure_connected()
+        _sf_service_instance._ensure_connected() 
     except (RuntimeError, ValueError, SalesforceAuthenticationFailed) as e:
         logger.error(f"SalesforceService connection check/reconnect failed for dependency: {e}", exc_info=True)
         _sf_service_instance = None 

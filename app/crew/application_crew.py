@@ -28,49 +28,58 @@ else:
     logger.critical("APPLICATION_CREW: GOOGLE_API_KEY environment variable not set. LLM will not be available.")
 
 
-# Define fields based on the provided cURL response for application data & client instructions
+# Define fields based on the client's explicit instructions
 APPLICATION_VERIFICATION_FIELDS = [
-    "SF Full Name", "Birthdate", "Gender", "Nationality", 
-    "ID Proof Type", "Conceptual ID Document Type", 
-    "Passport Number", "PassportIssuingCountry", "PassportExpiryDate",
-    "Aadhar Card Number", "applicationName" 
+    "ID Proof Type",    # Crucial for conditional logic
+    "Full Name",        # As specified by client
+    "Passport Number",  # Conditional
+    "Birthdate",
+    "Gender",
+    "PassportExpiryDate", # Conditional
+    "Nationality",      # Logic depends on ID Proof Type
+    "Aadhar Card Number" # Conditional (covers "Aadhar No")
 ]
 
 class ApplicationVerificationAgents:
     def data_comparator_agent(self) -> Agent:
         if not gemini_llm_application:
             raise RuntimeError("LLM for ApplicationVerificationAgents not initialized. Cannot create agent.")
+        
+        # Construct the field list string for the prompt
+        field_list_str = ", ".join([f"'{field}'" for field in APPLICATION_VERIFICATION_FIELDS])
+
         return Agent(
             role="Intelligent Application Detail Verification Analyst with Human-like Intuition",
             goal=(
                 "You are provided with: "
-                "1. Structured Salesforce application record data (as a JSON string). "
-                "2. Raw text extracted from a supporting identity document (e.g., Passport, Aadhar card). "
-                "Your multi-step goal is to: "
-                f"  a. From the raw document text, meticulously extract values for the predefined fields: `{', '.join(APPLICATION_VERIFICATION_FIELDS)}`. "
-                "     Apply nuanced understanding for variations. If a value is not found for a field, state 'Not Found in Document'. Be mindful that document legibility can impact extraction confidence. "
-                "  b. Apply specific client rules and human-like intuition for extraction and comparison: "
-                "     - **SF Full Name**: Aim for a 100% match with the document name, considering common name order variations (e.g., 'First Last' vs. 'Last, First'). If first and last names are exact matches and in a plausible order, minor variations in middle names/initials (e.g., present in one source, abbreviated or absent in the other) should be 'Partially Matched (Acceptable Variation)' with clear notes. Otherwise, if core components differ significantly, it's 'Mismatched'. "
-                "     - **ID Numbers**: "
-                "         - **Passport Number**: Must match the document value fully. "
-                "         - **Aadhar Card Number**: Must match the document value fully. If the Aadhar number in the document appears masked (e.g., 'XXXX-XXXX-1234' or only last 4 digits visible), verification should be based on comparing these visible last 4 digits with the corresponding last 4 digits from the Salesforce record. The status should reflect this (e.g., 'Matched (Masked Aadhar Verified)'). "
-                "     - **Birthdate**: The Date of Birth must match. Be robust in interpreting and comparing dates from various common formats (e.g., DD/MM/YY, MM/DD/YY, YYYY-MM-DD, Month D, YYYY), as long as the interpreted day, month, and year are identical. If the document provides less detail (e.g., only year, or year and month) while the record has a full date, use 'Partially Matched (Detail Variance)' if the available components align. "
-                "     - **PassportExpiryDate**: Extract the expiry date from the document. Clearly note this date and state if the passport appears to be expired (i.e., the date is in the past). For status, compare with record data if available; if record data is blank, state 'Found in Document Only'. "
-                "     - **PassportIssuingCountry**: Extract the passport's issuing country if visible on the document. "
-                "     - **Nationality**: Compare the 'Nationality' from the Salesforce record with the extracted 'PassportIssuingCountry' (if the ID document is a passport). If the record's 'Nationality' is not India and the 'ID Proof Type' is 'Passport', the 'PassportIssuingCountry' from the document should ideally match the record's 'Nationality'. Note any discrepancies or confirmations. "
-                "     - **Gender, ID Proof Type, Conceptual ID Document Type**: Aim for 'Matched' for exact matches or common, verifiable abbreviations. Use 'Partially Matched (Acceptable Variation)' for minor, reasonable differences. "
-                "     - **applicationName**: This is primarily for context. Note if it appears or aligns with any information in the document, if applicable. "
-                "  c. Compare the (processed/extracted) document values against the Salesforce record data, field by field for ALL predefined fields. Ensure every field from `APPLICATION_VERIFICATION_FIELDS` is addressed. "
-                "  d. For each predefined field, create a JSON object detailing this comparison: "
-                "     'field_name', 'record_value' (use 'Not Provided' if missing from Salesforce data), 'document_value' (from your extraction), "
-                "     'status' ('Matched', 'Mismatched', 'Partially Matched (Acceptable Variation)', 'Partially Matched (Detail Variance)', 'Matched (Masked Aadhar Verified)', 'Found in Record Only', 'Found in Document Only', 'Not Found in Either'), "
-                "     'confidence' (High, Medium, Low) for the status, "
-                "     'notes' (Brief, very specific explanation for the status, particularly for any partial matches, mismatches, how rules like masked Aadhar were applied, or if information is missing from one source). "
-                "Output a single, valid JSON array string where each element is an object representing the comparison for one predefined field."
+                "1. Structured Salesforce application record data (as a JSON string), which crucially includes an 'ID Proof Type' field. "
+                "2. Raw text extracted from a supporting identity document. "
+                "Your multi-step goal is to meticulously verify the application details against the document based on the Salesforce 'ID Proof Type'. "
+                f"The specific fields to verify are: {field_list_str}. "
+                "Your process is as follows:\n"
+                "  a. **Identify Document Type**: Use the 'ID Proof Type' from the Salesforce record as the primary indicator of the document provided (e.g., 'Passport', 'Aadhar'). Corroborate this by analyzing the document text for keywords (e.g., 'Passport', 'Aadhar Card', 'Republic of India', 'UIDAI').\n"
+                "  b. **Conditional Field Extraction & Verification**: For each field in the predefined list, extract its value from the document text *only if it's relevant to the identified ID Document Type*. "
+                "     - If a field is not applicable to the document type (e.g., 'Passport Number' when 'ID Proof Type' is 'Aadhar'), set its 'document_value' to 'Not Applicable (Document is [Identified Type])'. "
+                "     - If an *applicable* field's value is not found in the document, use 'Not Found in Document'.\n"
+                "  c. **Apply Specific Verification Rules**: \n"
+                "     - **'Full Name'**: Aim for a 100% match. Account for common name order variations. Minor middle name/initial discrepancies with otherwise matching first/last names can be 'Partially Matched (Acceptable Variation)'. Significant differences are 'Mismatched'.\n"
+                "     - **'Passport Number'**: **Only if 'ID Proof Type' (record) indicates 'Passport' AND document appears to be a Passport**: Extract from document. Must match record value fully.\n"
+                "     - **'Birthdate'**: Must match. Be robust with date formats (e.g., DD/MM/YY, MM/DD/YY, YYYY-MM-DD, Month D, YYYY). If document has less detail (e.g., only YYYY-MM) but aligns with record, use 'Partially Matched (Detail Variance)'.\n"
+                "     - **'Gender'**: Aim for 'Matched' for exact matches or common, verifiable abbreviations.\n"
+                "     - **'PassportExpiryDate'**: **Only if 'ID Proof Type' (record) indicates 'Passport' AND document appears to be a Passport**: Extract from document. Note if the passport is expired (date in the past).\n"
+                "     - **'Nationality'**: "
+                "         - **If 'ID Proof Type' (record) indicates 'Passport' AND document is a Passport**: Extract the issuing country from the document. This extracted country is the 'document_value' for 'Nationality'. Compare with record's 'Nationality'.\n"
+                "         - **If 'ID Proof Type' (record) indicates 'Aadhar' AND document is an Aadhar card**: Assume document's implied nationality is 'India'. Use 'India (implied by Aadhar)' as 'document_value' for 'Nationality'. Compare with record's 'Nationality'.\n"
+                "         - For other ID types, if nationality is clearly inferable from document, use that. Otherwise, 'Not Determinable from Document'.\n"
+                "     - **'Aadhar Card Number'** (covers 'Aadhar No'): **Only if 'ID Proof Type' (record) indicates 'Aadhar' AND document appears to be an Aadhar card**: Extract from document. Must match record value fully. Handle masked Aadhar (e.g., 'XXXX-XXXX-1234') by comparing visible last 4 digits; status 'Matched (Masked Aadhar Verified)'.\n"
+                "     - **'Application Name'**: Compare record value with any similar identifying name or application reference found in the document. Often for contextual alignment.\n"
+                "     - **'ID Proof Type' (Field Itself)**: Compare the 'ID Proof Type' from the Salesforce record with the type of document inferred from the document text. Status should reflect if they align ('Matched'), differ ('Mismatched - e.g., Record: Passport, Document: Aadhar'), or if the document type is unclear ('Partially Matched (Document Type Unclear)').\n"
+                "  d. **Output JSON**: For each field in the predefined list, create a JSON object with: 'field_name', 'record_value' (use 'Not Provided' if missing from Salesforce data), 'document_value', 'status' ('Matched', 'Mismatched', 'Partially Matched (Acceptable Variation)', 'Partially Matched (Detail Variance)', 'Matched (Masked Aadhar Verified)', 'Found in Record Only', 'Found in Document Only', 'Not Found in Either', 'Not Applicable', 'Record Inconsistency'), 'confidence' (High, Medium, Low), and 'notes' (explaining status, conditional logic, or discrepancies)."
+                "Output a single, valid JSON array string of these comparison objects."
             ),
             backstory=(
                 "You are an expert AI system for verifying application identity details against official documents. "
-                "You understand common data variations, apply contextual rules with precision, and adhere to client-specific instructions like handling masked Aadhar numbers and passport details. Your goal is thoroughness and accuracy."
+                "You understand common data variations, apply contextual rules with precision, and adhere to client-specific instructions, especially regarding conditional field verification based on ID Proof Type."
             ),
             llm=gemini_llm_application,
             verbose=True,
@@ -88,11 +97,11 @@ class ApplicationVerificationAgents:
                 "List each field's comparison clearly. "
                 "After the field-by-field breakdown, provide a concise 1-2 line 'Overall Feedback'. "
                 "This feedback must intelligently summarize the verification outcome, focusing on CRITICAL discrepancies "
-                "(e.g., 'Mismatched' ID numbers, significantly different 'SF Full Name', an expired 'PassportExpiryDate', or mismatch in 'Nationality' vs 'PassportIssuingCountry' when relevant) or critical missing information. "
-                "Downplay minor partial matches (like 'Partially Matched (Acceptable Variation)' or 'Partially Matched (Detail Variance)') if notes indicate reasonable explanations or adherence to specific client rules (e.g., masked Aadhar processing)."
+                "(e.g., 'Mismatched' ID numbers for the *relevant* ID type, significantly different 'Full Name', an expired 'PassportExpiryDate' if applicable, or mismatch in 'Nationality' vs. document-implied nationality) or critical missing information. "
+                "Downplay minor partial matches if notes indicate reasonable explanations or adherence to specific client rules (e.g., masked Aadhar processing, 'Not Applicable' fields due to ID type)."
             ),
             backstory=(
-                "You are a skilled report writer, synthesizing application verification data into clear, concise, and actionable summaries, highlighting what truly matters based on the detailed comparison and client guidelines."
+                "You are a skilled report writer, synthesizing application verification data into clear, concise, and actionable summaries, highlighting what truly matters based on the detailed comparison and client guidelines, especially the conditional nature of field verification."
             ),
             llm=gemini_llm_application,
             verbose=True,
@@ -101,14 +110,13 @@ class ApplicationVerificationAgents:
 
 class ApplicationVerificationTasks:
     def compare_data_and_output_json_task(self, agent: Agent, salesforce_record_data_json_str: str, document_text: str) -> Task:
-        field_list_str = ", ".join(APPLICATION_VERIFICATION_FIELDS)
+        # The agent's goal now contains the dynamic field list, so no need to pass it separately here.
         return Task(
             description=(
-                "Perform a comprehensive verification of application identity details based on client instructions.\n\n"
-                f"**Predefined Fields for Verification:**\n`{field_list_str}`\n\n"
+                "Perform a comprehensive verification of application identity details based on client instructions and the 'ID Proof Type' in the Salesforce record.\n\n"
                 f"**Salesforce Record Data (JSON String):**\n```json\n{salesforce_record_data_json_str}\n```\n\n"
                 f"**Document Text (Raw):**\n```text\n{document_text}\n```\n\n"
-                "**Your Process & Rules:** Strictly follow the multi-step process, extraction guidelines, and comparison rules defined in your agent's goal. Pay special attention to client instructions regarding Full Name matching, masked Aadhar numbers, Passport Expiry, Passport Issuing Country, Nationality, and Birthdate format handling.\n"
+                "**Your Process & Rules:** Strictly follow the multi-step process, conditional extraction guidelines (based on 'ID Proof Type'), and comparison rules defined in your agent's goal. Ensure all fields from the client-specified list are addressed, respecting their applicability to the identified document type.\n"
                 "**Final Output of this Task**: A single, valid JSON array string of comparison objects for each predefined field, adhering to the structure specified in your agent goal."
             ),
             agent=agent,
@@ -129,7 +137,7 @@ class ApplicationVerificationTasks:
                 "  Document Value: [document_value]\n"
                 "  Status: [status] (Confidence: [confidence])\n"
                 "  Notes: [notes]\n\n"
-                "After listing all fields, provide a concise 1-2 line 'Overall Feedback', summarizing critical findings as per your agent's goal, especially considering client-specific rules like ID verification outcomes and passport validity."
+                "After listing all fields, provide a concise 1-2 line 'Overall Feedback', summarizing critical findings as per your agent's goal, especially considering client-specific rules and the conditional nature of the verification (e.g., passport validity only if it's a passport)."
             ),
             agent=agent,
             context=context_tasks,
@@ -141,16 +149,29 @@ class ApplicationVerificationTasks:
 class ApplicationVerificationCrewOrchestrator:
     def __init__(self, record_data_dict: Dict[str, Any], document_text: str):
         # Filter the record_data_dict to include only keys present in APPLICATION_VERIFICATION_FIELDS
-        filtered_record_data = {
-            key: record_data_dict.get(key) 
-            for key in APPLICATION_VERIFICATION_FIELDS 
-            if key in record_data_dict
-        }
+        # This ensures that the JSON string passed to the agent only contains relevant fields.
+        filtered_record_data = {}
+        for key_sf in record_data_dict.keys():
+            # Simple direct mapping if key_sf is in APPLICATION_VERIFICATION_FIELDS
+            if key_sf in APPLICATION_VERIFICATION_FIELDS:
+                filtered_record_data[key_sf] = record_data_dict[key_sf]
+            # Handle potential variations like "Aadhar No" from SF data mapping to "Aadhar Card Number"
+            elif key_sf == "Aadhar No" and "Aadhar Card Number" in APPLICATION_VERIFICATION_FIELDS:
+                 filtered_record_data["Aadhar Card Number"] = record_data_dict[key_sf]
+            # Add other specific mappings here if SF keys differ from APPLICATION_VERIFICATION_FIELDS keys
+
+        # Ensure all APPLICATION_VERIFICATION_FIELDS are present in filtered_record_data, even if with None value,
+        # so the agent knows the complete list of fields it's expected to process from the record side.
+        for field in APPLICATION_VERIFICATION_FIELDS:
+            if field not in filtered_record_data:
+                filtered_record_data[field] = record_data_dict.get(field, None) # Get original if present, else None
+
+
         self.salesforce_record_data_json_str = json.dumps(filtered_record_data, indent=2)
         self.document_text = document_text
         self.agents_provider = ApplicationVerificationAgents()
         self.tasks_provider = ApplicationVerificationTasks()
-        logger.info(f"ApplicationVerificationCrewOrchestrator initialized. Relevant SF Fields: {list(filtered_record_data.keys())}. Doc length: {len(document_text)}.")
+        logger.info(f"ApplicationVerificationCrewOrchestrator initialized. SF Fields for agent: {list(filtered_record_data.keys())}. Doc length: {len(document_text)}.")
 
     def run(self) -> str:
         if not gemini_llm_application:
@@ -175,7 +196,7 @@ class ApplicationVerificationCrewOrchestrator:
                 agents=[comparator_agent, report_generator_agent],
                 tasks=[task1_compare_and_structure, task2_generate_report_str],
                 process=Process.sequential,
-                verbose=1 # Consider making verbose level configurable
+                verbose=1 
             )
             
             final_report_string = crew.kickoff()
@@ -184,7 +205,7 @@ class ApplicationVerificationCrewOrchestrator:
             
             if not final_report_string or not isinstance(final_report_string, str):
                 logger.error(f"ApplicationVerificationCrew produced an invalid or empty report. Type: {type(final_report_string)}")
-                raw_output_str = str(final_report_string) # Attempt to stringify for logging
+                raw_output_str = str(final_report_string) 
                 return f"Error: Application verification crew produced an invalid report. Raw output snippet: {raw_output_str[:200]}..."
 
             return final_report_string.strip()
