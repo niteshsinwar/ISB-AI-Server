@@ -1,0 +1,43 @@
+# Python specific
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*~$
+*.swp
+.#*
+
+# Virtual Environments
+venv/
+env/
+.venv/
+ENV/
+
+# macOS specific
+.DS_Store
+
+# IDE / Editor specific
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Build artifacts (if any, that aren't for deployment)
+build/
+dist/
+*.egg-info/
+
+# Logs (if you don't want to transfer local logs)
+*.log
+*.logs
+
+# Git directory (if you're using Git locally but not for server deployment)
+.git/
+.gitignore
+.gitattributes
+
+# Docker ignore file itself
+.dockerignore
+
+# This rsync exclude file
+rsync-exclude.txt

@@ -33,9 +33,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY ./app ./app
 COPY ./main.py .
 
-# Make port 8000 available to the world outside this container (or your configured API_PORT)
+# Make port 15841 available to the world outside this container (or your configured API_PORT)
 # This should match the port Uvicorn runs on.
-EXPOSE 8000
+EXPOSE 15841
 
 # Define the command to run the application using Uvicorn.
 # The root main.py will read API_HOST and API_PORT from environment variables.

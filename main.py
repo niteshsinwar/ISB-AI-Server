@@ -22,12 +22,12 @@ logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     host = os.getenv("API_HOST", "0.0.0.0")
-    port_str = os.getenv("API_PORT", "8000")
+    port_str = os.getenv("API_PORT", "15841")
     try:
         port = int(port_str)
     except ValueError:
-        logger.warning(f"Invalid API_PORT '{port_str}'. Defaulting to 8000.")
-        port = 8000
+        logger.warning(f"Invalid API_PORT '{port_str}'. Defaulting to 15841.")
+        port = 15841
 
     reload_flag = os.getenv("DEV_MODE", "false").lower() == "true"
 

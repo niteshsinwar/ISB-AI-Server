@@ -7,24 +7,27 @@ from crewai import Agent, Task, Crew, Process
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Import shared configurations
-# Create an app/config.py file with your actual GOOGLE_API_KEY and GEMINI_MODEL_NAME
-# Example app/config.py:
-# GOOGLE_API_KEY = "your_google_api_key_here"
-# GEMINI_MODEL_NAME = "gemini-pro" # Or your preferred model
 try:
     from app.config import GOOGLE_API_KEY, GEMINI_MODEL_NAME
 except ImportError:
-    GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY") # Fallback to environment variable
-    GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL_NAME", "gemini-pro") # Fallback
+    GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+    GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL_NAME", "gemini-pro")
     if not GOOGLE_API_KEY:
         print("Warning: GOOGLE_API_KEY not found in app.config or environment variables.")
 
-
 logger = logging.getLogger(__name__)
-# Basic logging configuration for demonstration if not configured elsewhere
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+# --- Configuration for Fields to Exclude from Agent Processing ---
+FIELDS_TO_EXCLUDE_FROM_PROCESSING: List[str] = [
+    'Applicant__c',
+    'type',
+    'Contact',
+    'recordId',
+    # 'RecordTypeName__c' should NOT be in this list as it's critical for logic,
+    # it will be handled specially.
+]
 
 # LLM Initialization
 gemini_llm_test_score = None
@@ -40,98 +43,140 @@ if GOOGLE_API_KEY:
         logger.error(f"Failed to initialize LLM for TestScoreVerificationCrew ({GEMINI_MODEL_NAME}): {e}", exc_info=True)
         gemini_llm_test_score = None
 else:
-    logger.critical("TEST_SCORE_CREW: GOOGLE_API_KEY not set. LLM will not be available.")
+    logger.critical("TEST_SCORE_CREW: GOOGLE_API_KEY environment variable not set. LLM will not be available.")
 
-
-# Comprehensive list of fields the agent uses as its master reference.
-# The agent will determine relevance based on RecordTypeName__c from the record.
-TEST_SCORE_VERIFICATION_FIELDS = [
-    "RecordTypeName__c", "Test_Date__c", "Email__c", "Test_ID__c",         # Common identifiers/metadata
-    "Verbal_Score__c", "Verbal_Percentile__c",                             # Common sections (scoring/scales may differ)
-    "Quantitative_Score__c", "Quantitative_Percentile__c",                 # Common sections (scoring/scales may differ)
-    "Total_Score__c", "Total_Percentile__c",                             # Common concept (derivation/composition differs significantly)
-    "Data_Insights_Score__c", "Data_Insights_Percentile__c",             # Primarily GMAT specific for main total score
-    "Analytical_Writing_Score__c", "Analytical_Writing_Percentile__c"     # GRE: distinct scored section. GMAT: separate AWA score (if this field is used for it)
-]
-
-# Define a mapping from canonical field names (used by the agent and TEST_SCORE_VERIFICATION_FIELDS)
-# to a list of potential Salesforce field names.
-# The first Salesforce name in the list found in record_data_dict will be used.
-SALESFORCE_TO_CANONICAL_MAP = {
-    "RecordTypeName__c": ["RecordTypeName__c"],
-    "Test_Date__c": ["hed__Test_Date__c", "Test_Date__c"],
-    "Email__c": ["Email__c"],
-    "Test_ID__c": ["Test_ID__c"],
-    "Verbal_Score__c": ["VerbalScore__c", "Verbal_Score__c"],
-    "Verbal_Percentile__c": ["VerbalPercentile__c", "Verbal_Percentile__c"],
-    "Quantitative_Score__c": ["QuantScore__c", "Quantitative_Score__c"],
-    "Quantitative_Percentile__c": ["QuantPercentile__c", "Quantitative_Percentile__c"],
-    "Total_Score__c": ["Total_Score__c"],
-    "Total_Percentile__c": ["Total_Percentile__c"],
-    "Data_Insights_Score__c": ["Data_Insights_Score__c"],
-    "Data_Insights_Percentile__c": ["Data_Insights_Percentile__c"],
-    "Analytical_Writing_Score__c": ["Analytical_Score__c", "Analytical_Writing_Score__c"],
-    "Analytical_Writing_Percentile__c": ["Analytical_Percentile__c", "Analytical_Writing_Percentile__c"]
-}
 
 class TestScoreVerificationAgents:
-    def data_comparator_agent(self) -> Agent:
+    def data_comparator_agent(self, verifiable_apex_field_names: List[str]) -> Agent:
         if not gemini_llm_test_score:
             raise RuntimeError("LLM for TestScoreVerificationAgents not initialized. Cannot create agent.")
-        
-        field_list_str = ", ".join([f"'{field}'" for field in TEST_SCORE_VERIFICATION_FIELDS])
 
+        apex_field_list_str_for_prompt = ", ".join([f"'{field}'" for field in verifiable_apex_field_names])
+        if not apex_field_list_str_for_prompt:
+             apex_field_list_str_for_prompt = "an empty list (no verifiable fields after initial filtering and special handling)"
+
+
+        agent_prompt = f"""
+You are a Meticulous Test Score Verification Analyst specializing in GMAT and GRE scores, possessing human-like intuition and intelligence.
+Your goal is to verify test score details from an official document against a Salesforce record.
+Most Important: Ignore Case Differences, Formatting Variations. The Record Data you receive has already had some system-level, non-verifiable fields removed. Focus your verification on the fields present in the provided Record Data and listed as 'Apex Field Names To Process'. 'RecordTypeName__c' will always be present in the full Record Data you use internally.
+
+**Input You Receive:**
+1.  **Record Data (JSON String)**: Data from Apex, accessible via `salesforce_record_data_json_str`. This data contains ALL original Apex fields, including 'RecordTypeName__c'.
+2.  **Document Text (Raw Official Test Score Report Text)**.
+3.  **List of Apex Field Names To Process**: This is the definitive list of fields from the Record Data (excluding 'RecordTypeName__c' which you handle specially, and other general exclusions) that you should consider for other canonical concepts or custom fields. It is provided in the task description as `verifiable_apex_field_list_str` (e.g., {apex_field_list_str_for_prompt}).
+
+**Core Test Score Concepts & Specific Verification Rules:**
+You understand the following canonical test score concepts. Your final JSON output should *only* include objects for those concepts you determine are relevant to the specific test type (GMAT or GRE) being verified, after processing them in the order listed.
+
+1.  **Canonical Concept: 'RecordTypeName__c' (Test Type Identifier)**
+    * *Apex Input Field Name*: This will ALWAYS be **'RecordTypeName__c'** in the input Record Data (JSON string).
+    * *Verification Rule*: This is CRUCIAL.
+        * The record's test type is directly available from the 'RecordTypeName__c' field in the full Record Data.
+        * Corroborate this by analyzing the document text for keywords (e.g., 'GRE General Test', 'GMAT Exam', 'Educational Testing Service', 'GMAC').
+        * 'document_value' should be the inferred document test type (e.g., "GRE (inferred from document)").
+        * 'status' reflects if the record's test type aligns with the document ('Matched'), differs ('Mismatched'), or is unclear.
+        * **The determined actual test type from this step (let's call it 'Determined Test Type') governs the relevance and processing of ALL other score fields.**
+
+(Once 'Determined Test Type' is established, process other relevant canonical concepts)
+
+Common Identifying Information (generally relevant for both test types):
+2.  **Canonical Concept: 'Test Date'**
+    * *Typical Apex Input Field Names*: 'hed__Test_Date__c', 'Test_Date__c', 'ExamDate', 'DateOfTest'.
+    * *Verification Rule*: Aim for exact match (YYYY-MM-DD). Handle partial matches (e.g., month/year only) as 'Partially Matched (Detail Variance)'.
+3.  **Canonical Concept: 'Email Address'**
+    * *Typical Apex Input Field Names*: 'Email__c', 'RegistrantEmail', 'CandidateEmail'.
+    * *Verification Rule*: Must match exactly if present in both record and document.
+4.  **Canonical Concept: 'Test ID'** (e.g., Registration Number, Appointment Number)
+    * *Typical Apex Input Field Names*: 'Test_ID__c', 'RegistrationNumber', 'AppointmentID', 'GMATTestID', 'GRERegID', 'Test_Score__r.Test_ID__c'.
+    * *Verification Rule*: Must match exactly if present in both record and document.
+
+Core Score Components (relevance and interpretation depend on 'Determined Test Type'):
+5.  **Canonical Concept: 'Verbal Score'**
+    * *Typical Apex Input Field Names*: 'VerbalScore__c', 'Verbal_Score__c', 'VerbalReasoningScore'.
+    * *Relevance*: Relevant for both GMAT and GRE. *Rule*: Must match precisely.
+6.  **Canonical Concept: 'Verbal Percentile'**
+    * *Typical Apex Input Field Names*: 'VerbalPercentile__c', 'Verbal_Percentile__c', 'VerbalRank'.
+    * *Relevance*: Relevant for both GMAT and GRE. *Rule*: Must match precisely.
+7.  **Canonical Concept: 'Quantitative Score'**
+    * *Typical Apex Input Field Names*: 'QuantScore__c', 'Quantitative_Score__c', 'QuantitativeReasoningScore'.
+    * *Relevance*: Relevant for both GMAT and GRE. *Rule*: Must match precisely.
+8.  **Canonical Concept: 'Quantitative Percentile'**
+    * *Typical Apex Input Field Names*: 'QuantPercentile__c', 'Quantitative_Percentile__c', 'QuantRank'.
+    * *Relevance*: Relevant for both GMAT and GRE. *Rule*: Must match precisely.
+9.  **Canonical Concept: 'Data Insights Score'**
+    * *Typical Apex Input Field Names*: 'Data_Insights_Score__c', 'DataInsightsScore', 'DI_Score', 'Data_Insights_score__c'.
+    * *Relevance*: **GMAT specific.** For GRE, generally 'Not Applicable'. *Rule*: If relevant, must match precisely.
+10. **Canonical Concept: 'Data Insights Percentile'**
+    * *Typical Apex Input Field Names*: 'Data_Insights_Percentile__c', 'DataInsightsPercentile', 'DI_Percentile'.
+    * *Relevance*: **GMAT specific.** For GRE, 'Not Applicable'. *Rule*: If relevant, must match precisely.
+11. **Canonical Concept: 'Analytical Writing Score'** (AWA)
+    * *Typical Apex Input Field Names*: 'Analytical_Score__c', 'Analytical_Writing_Score__c', 'AWAScore', 'EssayScore'.
+    * *Relevance*: GRE (scored 0-6), GMAT (AWA scored 0-6, separate from main total). *Rule*: If relevant, must match precisely.
+12. **Canonical Concept: 'Analytical Writing Percentile'**
+    * *Typical Apex Input Field Names*: 'Analytical_Percentile__c', 'Analytical_Writing_Percentile__c', 'AWAPercentile'.
+    * *Relevance*: Same as 'Analytical Writing Score'. *Rule*: If relevant, must match precisely.
+13. **Canonical Concept: 'Total Score'**
+    * *Typical Apex Input Field Names*: 'Total_Score__c', 'OverallScore', 'CompositeScore'.
+    * *Relevance*: Both GMAT & GRE.
+    * *Document Value & Verification*:
+        1. Find explicit Total Score in document.
+        2. If 'Determined Test Type' is 'GRE' AND explicit Total NOT found: 'document_value' = (Doc Verbal Score + Doc Quant Score). Note 'Calculated...'. Else 'Not Found'.
+        3. If 'Determined Test Type' is 'GMAT' AND explicit Total NOT found: 'document_value' is 'Not Found'. Note 'GMAT Total Score is scaled...'.
+        4. Compare determined 'document_value' with record's 'Total Score'.
+14. **Canonical Concept: 'Total Percentile'**
+    * *Typical Apex Input Field Names*: 'Total_Percentile__c', 'OverallPercentile', 'CompositeRank'.
+    * *Relevance*: Both GMAT & GRE. *Rule*: Must match precisely.
+
+**Your Verification Process & Output Structure:**
+Let `processed_apex_fields` be a set to track mapped Apex fields from the **List of Apex Field Names To Process**.
+Let `results_list` be an empty list for output objects.
+Let `determined_test_type` be a variable to store the type from Part 1.
+
+**Part 1: Determine 'RecordTypeName__c' (Test Type Identifier) and 'Determined Test Type'**
+   - Process the **'RecordTypeName__c'** Canonical Concept:
+     A.  **Find Record Value**:
+         * The `record_value` is the value of the **'RecordTypeName__c'** field from the input Record Data (JSON string). You must parse the JSON to get this value.
+         * Set `original_apex_field_name` to 'RecordTypeName__c'.
+         * If 'RecordTypeName__c' is not present in the Record Data or its value is null/empty, this is a critical error. Set `record_value` to 'MISSING CRITICAL RecordTypeName__c', status 'Error', and notes explaining this. `determined_test_type` would be 'Unknown'.
+     B.  **Apply Verification Rule**: Follow rule to analyze document, determine `document_value` for test type, and set `determined_test_type` based on the record's 'RecordTypeName__c' value and document corroboration.
+     C.  **Construct Output Object**: Create JSON object for 'RecordTypeName__c'. Add to `results_list`.
+     D.  Add 'RecordTypeName__c' to `processed_apex_fields` if it happened to be in the **List of Apex Field Names To Process** (it generally won't be if that list is pre-filtered specifically to exclude it for iterative purposes, but this is a safeguard).
+
+**Part 2: Process Other Canonical Concepts (In Order)**
+   - For EACH of the *other* Canonical Concepts (from 'Test Date' onwards), in order:
+     A.  **Find Record Value**:
+         * Examine its 'Typical Apex Input Field Names'. Check if any are in the **List of Apex Field Names To Process** AND NOT in `processed_apex_fields`.
+         * If match (first unprocessed): `record_value` = value from Record Data using the matched Apex field name. `original_apex_field_name` = matched Apex field. Add to `processed_apex_fields`.
+         * Else: `record_value` = 'Not Provided in Record'. `original_apex_field_name` = 'N/A'.
+     B.  **Check Relevance**: Based on `determined_test_type` (from Part 1), is this Canonical Concept relevant? (e.g., 'Data Insights Score' for GMAT). Key identifiers ('Test Date', 'Email Address', 'Test ID') are generally always relevant if data exists or is expected.
+     C.  **Extract/Determine Document Value & Verify (If Relevant)**:
+         * If relevant: Determine `document_value` (extract or calculate per rule). If not found, 'Not Found in Document'. Apply Specific Verification Rule. Determine `status`, `confidence`.
+         * If not relevant: `document_value` = 'Not Applicable (Test Type is [determined_test_type])', `status` = 'Not Applicable', `confidence` = 'High'.
+     D.  **Construct & Conditionally Add Output Object**: Create JSON object. **Add to `results_list` ONLY IF Step B determined it was RELEVANT for `determined_test_type`** (or if it's a key identifier like Test Date, Email, Test ID where presence/absence itself is a finding).
+
+**Part 3: Handle Unmapped Custom Apex Fields (Fields from the 'List of Apex Field Names To Process' that weren't mapped)**
+    - Iterate through each `apex_field_name` in the **List of Apex Field Names To Process**.
+    - If `apex_field_name` NOT in `processed_apex_fields`:
+        * This is custom. Construct object:
+            * `'field_name'`: `apex_field_name`. `'original_apex_field_name'`: same.
+            * `'record_value'`: from Record Data.
+            * `'document_value'`: 'Not Applicable (Custom Field)' or generic extraction.
+            * `'status'`: 'Info Extracted (Custom Field)' or 'Needs Manual Review (Custom Field)'.
+            * `'notes'`: "Processed as a custom field."
+        * Add to `results_list`.
+
+**Part 4: 'Official Score' Indication (Update notes of 'RecordTypeName__c' or add a summary object if easier)**
+    - Based on the matching status of *relevant* critical scores and identifiers in `results_list`, update the notes for the 'RecordTypeName__c' concept (or add a specific summary object to `results_list` if that's easier for you to structure) to indicate if the document strongly supports the record, or if there are 'Potentially Update Record' statuses for relevant fields.
+
+**Final Output**: Return `results_list` as a single, valid JSON array. Output ONLY includes RELEVANT Canonical Concepts for the Determined Test Type, plus any custom fields.
+"""
         return Agent(
-            role="Meticulous Test Score Verification Analyst for GMAT and GRE", # Role updated
-            goal=(
-                "You are provided with: "
-                "1. Structured Salesforce record data for a Test Score (as a JSON string), which includes **'RecordTypeName__c'** (either 'GRE' or 'GMAT'). "
-                "2. Raw text extracted from a supporting official test score document. "
-                "Your multi-step goal is to: "
-                "  a. Based on the **'RecordTypeName__c'** in the Salesforce record (either 'GRE' or 'GMAT'), determine the **specific list of fields that are relevant** for that particular test type's primary assessment and score reporting. "
-                "     This list will be a dynamically selected subset of all known test score fields "
-                f"     (master list for context: `{field_list_str}`). \n"
-                "     - If 'RecordTypeName__c' is **'GRE'**: \n" # GRE Relevance
-                "       - Relevant fields include Verbal, Quantitative, Analytical Writing (as a scored section from 0-6), and their respective scores/percentiles, plus the overall Total Score (typically Verbal Score + Quantitative Score for the main score range like 260-340).\n"
-                "       - Fields like 'Data_Insights_Score__c' are NOT relevant for GRE.\n"
-                "     - If 'RecordTypeName__c' is **'GMAT'**: \n" # GMAT Relevance
-                "       - Relevant fields for the main GMAT score (typically 205-805) include Verbal, Quantitative, Data Insights, and their respective scores/percentiles, plus the overall Total Score. \n"
-                "       - 'Analytical_Writing_Score__c' for GMAT refers to the AWA (Analytical Writing Assessment), which is scored separately (e.g., 0-6) and does NOT contribute to the main GMAT Total Score (205-805). You should still process an AWA score if present and listed as 'Analytical_Writing_Score__c', but recognize its separate nature for GMAT when considering the main Total Score. \n"
-                "     Your output JSON array should only contain objects for fields you determine are relevant for comparison based on these distinctions for the given test type.\n"
-                "  b. For **each field in the determined relevant list from step a**: "
-                "     i. **Value Extraction and Determination from Document (Field-Specific Rules):**\n"
-                "        - For most fields: Meticulously extract its value from the raw document text. If a value for this relevant field is not found in the document, this field's 'document_value' will be 'Not Found in Document'.\n"
-                "        - **Special Handling for 'Total_Score__c' (only if 'Total_Score__c' is determined to be relevant in step a):**\n"
-                "          1. First, attempt to find an explicitly stated Total Score in the document text. If a numeric Total Score is explicitly found, use this as the 'document_value' for 'Total_Score__c'. The 'notes' should indicate 'Explicitly found in document'.\n"
-                "          2. If an explicit Total Score is NOT found in the document text, AND the 'RecordTypeName__c' is **'GRE'**: \n" # Total Score for GRE
-                "             - Check the values you previously extracted *from the document text* for 'Verbal_Score__c' and 'Quantitative_Score__c' during this current analysis of the document.\n"
-                "             - If both 'Verbal_Score__c' and 'Quantitative_Score__c' were successfully extracted from the document text as numeric values, then calculate the 'document_value' for 'Total_Score__c' by summing these two document-extracted section scores (Document Verbal + Document Quantitative).\n"
-                "             - The 'notes' for 'Total_Score__c' must then clearly state 'Calculated from document section scores (Verbal + Quant)'. The confidence for this calculated score should be 'High' if the section scores were extracted with high confidence.\n"
-                "             - If these required section scores were not found in the document text or were not numeric, then the 'document_value' for 'Total_Score__c' remains 'Not Found in Document'. The 'notes' should explain why calculation was not possible (e.g., 'Explicit Total Score not found, and section scores for calculation were missing or non-numeric in document').\n"
-                "          3. If the 'RecordTypeName__c' is **'GMAT'**, and an explicit Total Score is NOT found in the document text: \n" # Total Score for GMAT
-                "             - The 'document_value' for 'Total_Score__c' is 'Not Found in Document'. \n"
-                "             - The 'notes' should state 'Explicit GMAT Total Score not found in document; GMAT Total Score is a scaled score derived from Verbal, Quantitative, and Data Insights sections and is not calculated by simple summation here. Report individual GMAT section scores as extracted.'\n"
-                "          4. If, after the above steps, no explicit or calculated value is determined for 'Total_Score__c' from the document, its 'document_value' is 'Not Found in Document'.\n"
-                "     ii. Apply specific verification rules (as detailed below) to this field, using the 'document_value' determined in step b.i. "
-                "     iii. Compare the 'document_value' (which might be an extracted value, a calculated value for Total_Score__c for GRE, or 'Not Found in Document') against the Salesforce 'record_value' for this field. "
-                "     iv. Create a JSON object detailing: 'field_name' (for this specific relevant field), 'record_value', 'document_value', "
-                "         'status' ('Matched', 'Mismatched', 'Partially Matched (Detail Variance)', 'Found in Record Only', 'Found in Document Only', 'Not Found in Either', 'Potentially Update Record'), "
-                "         'confidence' (High, Medium, Low - assess based on clarity of extraction or calculation basis), "
-                "         'notes' (Crucial for explaining status and value origins for this field, especially if calculated or related to GMAT AWA). "
-                "  c. **Specific Verification Rules (to be applied to the relevant fields identified in step a)**: "
-                "     - **'RecordTypeName__c' / Test Type**: Document should confirm the test type ('GRE' or 'GMAT') stated in the record. Minor variations are acceptable. "
-                "     - **Key Identifiers** (e.g., `Test_ID__c`, `Email__c` - if relevant for the test type): Must match exactly between record and document. "
-                "     - **'Test_Date__c'**: Aim for exact match (YYYY-MM-DD). Handle partial matches as specified. "
-                "     - **Scores & Percentiles** (Verbal, Quantitative, Analytical Writing, Data Insights, Total - *only those relevant to the specific test type's primary scoring structure being processed*): Must match precisely. Allow minor numeric formatting differences (e.g., 99 vs 99.00). The 'Total_Score__c' comparison will use its document value as determined in step b.i. "
-                "  d. **'Official Score' Indication & Handling Discrepancies (applied to the processed relevant fields)**: "
-                "     - If all critical scores, percentiles, and key identifiers *that are relevant to this test type's primary assessment* match exactly, the notes for `RecordTypeName__c` (or a summary note) should indicate: 'Document strongly supports the record as official for the identified relevant fields.' "
-                "     - If a score/percentile *in the relevant set* is blank or different from the document, BUT other key identifiers (if relevant) AND a majority of other *relevant* scores/percentiles match the document, set status for the differing field to 'Potentially Update Record'. Notes must clearly state record value, document value, and why an update might be considered. "
-                "     - If critical identifiers *relevant to this test type* (e.g., Test_ID__c, Email__c) do not match, this is a major discrepancy, status 'Mismatched' for those identifiers, and overall confidence in the match should be low, even if some scores appear similar. "
-                "**Output a single, valid JSON array string where each element is an object representing the comparison *only for one of the fields identified as relevant in step a*.**"
-            ),
+            role="Advanced Test Score Verification Analyst for GMAT/GRE with Prioritized Mapping",
+            goal=agent_prompt,
             backstory=(
-                "You are an expert AI system designed for precise and rule-based analysis of standardized test score reports, specifically GMAT and GRE. " # Backstory updated
-                "You meticulously extract data, understand the nuances of GMAT and GRE including their specific scoring structures (e.g., how GRE Total Scores are commonly derived, how GMAT Total Scores are scaled, and how GMAT AWA is separate), focus only on relevant fields based on the test's Record Type, apply strict verification rules, and clearly report findings."
+                "You are an AI expert at verifying GMAT and GRE test scores. "
+                "You map varied field names (from a pre-filtered set) to known concepts using typical names first, apply test-type specific logic for relevance and score calculation (knowing 'RecordTypeName__c' is fixed and in the full JSON), and filter output to only relevant fields."
             ),
             llm=gemini_llm_test_score,
             verbose=True,
@@ -142,21 +187,27 @@ class TestScoreVerificationAgents:
         if not gemini_llm_test_score:
             raise RuntimeError("LLM for TestScoreVerificationAgents not initialized. Cannot create agent.")
         return Agent(
-            role="Insightful Test Score Verification Report Synthesizer",
+            role="Insightful Test Score Verification Report Synthesizer for GMAT/GRE",
             goal=(
-                "You will receive a JSON array string detailing field-by-field comparisons for test scores (GMAT or GRE). This array will *only* contain fields relevant to the specific test type being verified. "
-                "Format this into a single, human-readable string report starting with 'Test Score Verification Details:'. "
-                "List each field's comparison clearly. "
+                "You will receive a JSON array string detailing field-by-field comparisons for GMAT or GRE test scores. This array *only* contains fields relevant to the specific test type verified, plus any custom fields found. "
+                "Most Important: Ignore Case Differences, Formatting Variations, and DO NOT Include Field Like Record Id\n"
+                "Each object includes 'field_name' (a canonical concept or original Apex name), 'original_apex_field_name', and other verification details.\n"
+                "Format this into a single, human-readable string report starting with 'Test Score Verification Details:'.\n"
+                "The first item should clearly state the determined test type (e.g., from the 'RecordTypeName__c' field's notes or value).\n"
+                "Then, for each field from the JSON, list:\n"
+                "- Field: [field_name] (Original Apex Field: [original_apex_field_name])\n"
+                "  Record Value: [record_value]\n"
+                "  Document Value: [document_value]\n"
+                "  Status: [status] (Confidence: [confidence])\n"
+                "  Notes: [notes]\n\n"
                 "After the field-by-field breakdown, provide a concise 1-2 line 'Overall Feedback'. "
-                "This feedback must intelligently summarize the verification outcome, focusing on CRITICAL discrepancies "
-                "(e.g., 'Mismatched' relevant scores, `Test_ID__c`, `Email__c`, or significantly different `Test_Date__c` year). "
+                "This feedback must intelligently summarize the verification outcome, focusing on CRITICAL discrepancies for the *relevant* sections of the identified test type (e.g., 'Mismatched' relevant scores, `Test ID`, `Email Address`, or significantly different `Test Date` year). "
                 "Also highlight if the comparison suggests the document strongly supports the record as 'official' or if there are fields with status 'Potentially Update Record'. "
-                "Downplay minor date detail variances if core components align and it's noted. "
-                "The feedback should reflect a human-like assessment of whether the document substantially supports and validates the recorded test score information."
+                "Acknowledge the test type (GMAT/GRE) in your summary."
             ),
             backstory=(
-                "You are a skilled report writer who synthesizes complex GMAT and GRE test score verification data into insightful summaries. " # Backstory updated
-                "You can distinguish between critical errors, minor data variations, and situations suggesting record updates based on official documents. You expect to receive data only for fields relevant to the test type."
+                "You are a skilled report writer, synthesizing GMAT/GRE test score verification data into clear summaries. "
+                "You focus on materiality, distinguishing critical errors from minor variations, and understand that only test-type relevant fields (plus custom) are presented to you. You highlight actionable insights."
             ),
             llm=gemini_llm_test_score,
             verbose=True,
@@ -164,116 +215,118 @@ class TestScoreVerificationAgents:
         )
 
 class TestScoreVerificationTasks:
-    def compare_data_and_output_json_task(self, agent: Agent, salesforce_record_data_json_str: str, document_text: str) -> Task:
+    def compare_data_and_output_json_task(self, agent: Agent, salesforce_record_data_json_str: str, document_text: str, verifiable_apex_field_list_str: str) -> Task:
         return Task(
             description=(
-                "Perform a rule-based, comprehensive verification of test score details comparing Salesforce record data against text from an official test score document (GMAT or GRE).\n\n"
-                f"**Salesforce Test Score Record Data (JSON String, includes 'RecordTypeName__c' to identify test type 'GRE' or 'GMAT'):**\n```json\n{salesforce_record_data_json_str}\n```\n\n"
+                "Perform rule-based verification of GMAT/GRE test scores. The test type is identified directly from the 'RecordTypeName__c' field in the full Salesforce record data. Then, map other received Apex fields (from the 'List of Verifiable Apex Field Names') to Canonical Concepts, apply test-type specific logic for relevance and score calculation. Handle unmapped fields as custom.\n\n"
+                f"**Salesforce Record Data (JSON String from Apex - this is the FULL original data, ensuring 'RecordTypeName__c' is available):**\n```json\n{salesforce_record_data_json_str}\n```\n\n"
                 f"**Document Text (Raw Official Test Score Report Text):**\n```text\n{document_text}\n```\n\n"
-                "**Your Process & Strict Rules (as per your detailed role and goal description for GMAT/GRE):**\n"
-                "1.  **Identify Test Type & Relevant Fields**: Use **'RecordTypeName__c'** from the Salesforce record ('GRE' or 'GMAT') to understand the test structure and determine the specific subset of fields relevant for extraction, comparison, and output, paying attention to differences in scoring components (e.g., Data Insights for GMAT, Analytical Writing's role in GRE vs. GMAT AWA).\n"
-                "2.  **Extract/Determine from Document**: For all fields identified as *relevant*, determine their values from the 'Document Text' according to your specific field handling rules (including special logic for Total_Score__c calculation for GRE, and acknowledging GMAT's scaled Total Score).\n"
-                "3.  **Apply Verification Rules During Comparison**: Adhere to the defined verification rules for all relevant fields.\n"
-                "4.  **Structure Output & Handle Discrepancies**: For each *relevant* field, create a JSON object with all required attributes ('field_name', 'record_value', 'document_value', 'status', 'confidence', 'notes').\n\n"
-                "**Final Output of this Task**: A single, valid JSON array string of detailed comparison objects, **containing only the fields identified as relevant to the specific test type (GMAT or GRE).** Ensure all instructions in your goal are meticulously followed."
+                f"**List of Verifiable Apex Field Names To Process (this list has been pre-filtered, e.g., excludes RecordTypeName__c for *this specific listing*, but agent knows to use RecordTypeName__c from full data):** {verifiable_apex_field_list_str}\n\n"
+                "**Your Process & Strict Rules (as per your agent goal for GMAT/GRE analysis):**\n"
+                "1.  **Determine Test Type**: Directly use 'RecordTypeName__c' from the full Record Data (JSON string). This dictates further logic.\n"
+                "2.  **Process Canonical Concepts**: For each, map known Apex fields from the provided 'List of Verifiable Apex Field Names To Process'. Determine relevance by test type. If relevant, verify. If not, mark 'Not Applicable'.\n"
+                "3.  **Handle Unmapped Fields**: Process remaining fields from the 'List of Verifiable Apex Field Names To Process' as custom.\n"
+                "4.  **Structure Output**: For each concept/field processed, create JSON object. The final array should ONLY contain objects for RELEVANT canonical concepts for the determined test type, plus any custom fields.\n\n"
+                "**Final Output of this Task**: A single, valid JSON array string of comparison objects, **containing ONLY the fields identified as relevant to the specific test type (GMAT or GRE), plus any custom fields processed.**"
             ),
             agent=agent,
             expected_output=(
-                "A valid JSON array string. Each object details a field's comparison and includes: "
-                "'field_name', 'record_value', 'document_value', 'status', 'confidence', 'notes'. "
-                "The array must ONLY contain objects for fields relevant to the test type identified by 'RecordTypeName__c'."
+                "A valid JSON array string. Each object details a field's comparison: "
+                "'field_name' (canonical concept name or original Apex name for custom), 'original_apex_field_name', "
+                "'record_value', 'document_value', 'status', 'confidence', 'notes'. "
+                "The array must ONLY contain objects for fields relevant to the test type determined from 'RecordTypeName__c', plus any processed custom fields."
             )
         )
 
     def generate_formatted_report_task(self, agent: Agent, context_tasks: list) -> Task:
-        # This task definition remains largely the same as it's about formatting the JSON output
         return Task(
             description=(
-                "You will receive a JSON array string (from the previous task's context) detailing field-by-field test score comparisons. This JSON array will *only* contain information for fields relevant to the specific test type. \n"
-                "Each object in the array contains 'field_name', 'record_value', 'document_value', 'status', 'confidence', and 'notes'.\n\n"
-                "Format this into a single, human-readable string report, starting with 'Test Score Verification Details:'.\n"
-                "For each field in the provided JSON, list:\n"
-                "- Field: [field_name]\n"
-                "  Record Value: [record_value]\n"
-                "  Document Value: [document_value]\n"
-                "  Status: [status] (Confidence: [confidence])\n"
-                "  Notes: [notes]\n\n"
-                "After listing all fields, provide a concise 1-2 line 'Overall Feedback'. This feedback should intelligently summarize the outcome, "
-                "emphasizing critical mismatches (e.g., `Test_ID__c`, `Email__c`, core scores), or if the document strongly supports the record as 'official' (check notes from comparator). "
-                "Explicitly mention if any fields have a status of 'Potentially Update Record' and what those fields are. "
-                "The goal is to reflect a human-like assessment of the document's support for the recorded test score and highlight actionable insights."
+                "You will receive a JSON array string (from context) detailing field-by-field GMAT/GRE test score comparisons. This JSON *only* contains fields relevant to the specific test type verified, plus any custom fields.\n"
+                "Transform this JSON into a single, human-readable string report as per your agent's goal. "
+                "Ensure your report displays both 'field_name' (canonical concept/custom) and 'original_apex_field_name' for each item. "
+                "Your 'Overall Feedback' should be insightful, reflecting the GMAT/GRE context, critical findings, and any 'Potentially Update Record' suggestions."
             ),
             agent=agent,
             context=context_tasks,
             expected_output=(
-                "A single string: 'Test Score Verification Details:' section with field-by-field breakdown for relevant fields only, followed by 'Overall Feedback:' (1-2 lines) highlighting critical findings, official status implications, and potential record updates."
+                "A single string: 'Test Score Verification Details:' section (clearly stating GMAT/GRE type) with field-by-field breakdown for relevant/custom fields only (showing canonical/custom and original Apex names), followed by 'Overall Feedback:'."
             )
         )
 
 class TestScoreVerificationCrewOrchestrator:
     def __init__(self, record_data_dict: Dict[str, Any], document_text: str):
+        # Store the original dictionary to ensure 'RecordTypeName__c' is always available if present
+        self.original_record_data_dict = record_data_dict.copy()
+
+        # Create a working copy for general processing and filtering for the iterative parts of the agent's logic
+        processed_dict_for_iteration = self.original_record_data_dict.copy()
+        for field_to_remove in FIELDS_TO_EXCLUDE_FROM_PROCESSING:
+            if field_to_remove in processed_dict_for_iteration:
+                del processed_dict_for_iteration[field_to_remove]
+
+        # Specifically remove RecordTypeName__c from this iterative list because it's handled uniquely by the agent.
+        # The agent will access RecordTypeName__c directly from the full JSON string.
+        if 'RecordTypeName__c' in processed_dict_for_iteration:
+            del processed_dict_for_iteration['RecordTypeName__c']
+
+        # This list is for the agent to iterate over for Parts 2 & 3 of its logic
+        self.verifiable_apex_field_names_for_iteration: List[str] = list(processed_dict_for_iteration.keys())
+
+        # The JSON string passed to the agent should be from the original_record_data_dict
+        # so it has access to 'RecordTypeName__c' and all other original fields.
+        self.salesforce_record_data_json_str = json.dumps(self.original_record_data_dict, indent=2)
         self.document_text = document_text
         self.agents_provider = TestScoreVerificationAgents()
         self.tasks_provider = TestScoreVerificationTasks()
 
-        self.record_type_name = None
-        sf_record_type_keys = SALESFORCE_TO_CANONICAL_MAP.get("RecordTypeName__c", ["RecordTypeName__c"])
-        for sf_key in sf_record_type_keys:
-            if sf_key in record_data_dict:
-                self.record_type_name = record_data_dict[sf_key]
-                break
-        
-        if not self.record_type_name:
-            logger.warning(
-                "'RecordTypeName__c' (or its mapped Salesforce equivalent) is missing or empty in record_data_dict. "
-                "The agent will struggle to determine relevant fields for test score verification."
-            )
-        elif self.record_type_name not in ["GRE", "GMAT"]:
-            logger.warning(
-                f"RecordTypeName__c is '{self.record_type_name}', which might not be explicitly handled by the agent's detailed GRE/GMAT logic. "
-                "Agent will use general relevance determination."
-            )
 
+        record_type_name_from_payload = self.original_record_data_dict.get('RecordTypeName__c', "Unknown (Field 'RecordTypeName__c' not in original payload)")
 
-        processed_record_data = {}
-        for canonical_field in TEST_SCORE_VERIFICATION_FIELDS:
-            if canonical_field == "RecordTypeName__c":
-                processed_record_data[canonical_field] = self.record_type_name
-                continue
-
-            value_found = False
-            salesforce_keys_for_field = SALESFORCE_TO_CANONICAL_MAP.get(canonical_field, [canonical_field])
-            
-            for sf_key in salesforce_keys_for_field:
-                if sf_key in record_data_dict:
-                    processed_record_data[canonical_field] = record_data_dict[sf_key]
-                    value_found = True
-                    break
-            
-            if not value_found:
-                processed_record_data[canonical_field] = None
-
-        self.salesforce_record_data_json_str = json.dumps(processed_record_data, indent=2)
-        
         logger.info(
-            f"TestScoreVerificationCrewOrchestrator initialized. Record Type: {self.record_type_name if self.record_type_name else 'Unknown'}. "
+            f"TestScoreVerificationCrewOrchestrator initialized. "
+            f"Original Apex fields received: {list(self.original_record_data_dict.keys())}. "
+            f"Record Type from payload ('RecordTypeName__c'): {record_type_name_from_payload}. Agent will use this directly. "
+            f"Fields for iterative processing by agent (after exclusions and special handling of RecordTypeName__c): {self.verifiable_apex_field_names_for_iteration}. "
             f"Input Document Text Length: {len(document_text)}."
         )
+        logger.debug(f"Salesforce Record (FULL ORIGINAL DATA passed as JSON) for Agent: {self.salesforce_record_data_json_str}")
+
 
     def run(self) -> str:
         if not gemini_llm_test_score:
             logger.error("TestScoreVerificationCrew cannot run: LLM not initialized.")
-            return "Error: LLM for test score verification not available. Please check GOOGLE_API_KEY and ensure Gemini model initialization succeeded."
+            return "Error: LLM for test score verification not available. Please check GOOGLE_API_KEY."
+
+        # Check for RecordTypeName__c in the original data
+        if 'RecordTypeName__c' not in self.original_record_data_dict or not self.original_record_data_dict.get('RecordTypeName__c'):
+             logger.error("TestScoreVerificationCrew: Critical field 'RecordTypeName__c' is missing or empty in the Apex payload. Cannot determine test type.")
+             return "Error: Test type identifier ('RecordTypeName__c') missing from input data. Verification cannot proceed."
+
+        # Check if the original payload itself was empty (even before filtering for iteration)
+        if not self.original_record_data_dict: # Check if the original dictionary was empty
+            logger.warning("TestScoreVerificationCrew: No fields received in Apex payload (original_record_data_dict is empty). Returning empty report.")
+            return "Test Score Verification Details:\n\nNo data provided from Salesforce record for verification.\n\nOverall Feedback: No data to verify."
+        # The case where only RecordTypeName__c is present (and verifiable_apex_field_names_for_iteration is empty) is handled by the agent
+        # as it will process RecordTypeName__c and then find no other fields for Parts 2 & 3.
+
         try:
-            comparator_agent = self.agents_provider.data_comparator_agent()
+            comparator_agent = self.agents_provider.data_comparator_agent(
+                verifiable_apex_field_names=self.verifiable_apex_field_names_for_iteration
+            )
             report_generator_agent = self.agents_provider.final_report_generator_agent()
+
+            verifiable_apex_field_list_str_for_task = ", ".join([f"'{f}'" for f in self.verifiable_apex_field_names_for_iteration])
+            if not verifiable_apex_field_list_str_for_task:
+                verifiable_apex_field_list_str_for_task = "none (other than RecordTypeName__c which is handled specially by the agent)"
+
 
             task1_compare_and_structure = self.tasks_provider.compare_data_and_output_json_task(
                 agent=comparator_agent,
-                salesforce_record_data_json_str=self.salesforce_record_data_json_str,
-                document_text=self.document_text
+                salesforce_record_data_json_str=self.salesforce_record_data_json_str, # Full JSON from original_record_data_dict
+                document_text=self.document_text,
+                verifiable_apex_field_list_str=verifiable_apex_field_list_str_for_task
             )
-            
+
             task2_generate_report_str = self.tasks_provider.generate_formatted_report_task(
                 agent=report_generator_agent,
                 context_tasks=[task1_compare_and_structure]
@@ -285,18 +338,18 @@ class TestScoreVerificationCrewOrchestrator:
                 process=Process.sequential,
                 verbose=1
             )
-            
+
             final_report_string = crew.kickoff()
-            
+
             logger.info(f"TestScoreVerificationCrew execution completed. Report length: {len(final_report_string if final_report_string else '')}")
-            
+
             if not final_report_string or not isinstance(final_report_string, str):
                 logger.error(f"TestScoreVerificationCrew produced an invalid or empty report. Type: {type(final_report_string)}. Output: {str(final_report_string)[:500]}")
-                return f"Error: Test Score Verification crew produced an invalid or empty report."
+                return f"Error: Test Score Verification crew produced an invalid or empty report. Raw output: {str(final_report_string)[:200]}..."
+
 
             return final_report_string.strip()
 
         except Exception as e:
             logger.error(f"TestScoreVerificationCrew execution failed: {e}", exc_info=True)
             return f"Error during test score verification crew processing: {str(e)}"
-

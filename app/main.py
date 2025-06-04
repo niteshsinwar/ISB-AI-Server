@@ -16,10 +16,6 @@ import logging
 logger = logging.getLogger(__name__)
 setup_logging()
 
-# REMOVE these lines from app/main.py:
-# _app_instance_storage = {"app": None}
-# def set_app_instance(app: FastAPI): ...
-# def get_app_instance() -> FastAPI: ...
 
 @asynccontextmanager
 async def lifespan(app_lifespan: FastAPI):
