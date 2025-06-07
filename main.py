@@ -4,15 +4,10 @@ import os
 from dotenv import load_dotenv
 import logging
 
-# Load .env before other imports that might need environment variables
-load_dotenv()
+load_dotenv() # Load environment variables from .env
 
-# Initialize basic logging configuration early if needed by modules imported by app.main
-# However, the main logging setup will be in app.core.logging_config and called by app.main
-# This is just a fallback or initial setup.
+# Basic logging configuration
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
-# Ensure logging is configured if this script is run directly and imports cause logging calls
-# before app.main fully configures it.
 logging.basicConfig(
     level=getattr(logging, log_level_str, logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -22,30 +17,44 @@ logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     host = os.getenv("API_HOST", "0.0.0.0")
-    port_str = os.getenv("API_PORT", "15841")
-    try:
-        port = int(port_str)
-    except ValueError:
-        logger.warning(f"Invalid API_PORT '{port_str}'. Defaulting to 15841.")
-        port = 15841
+    port_str = os.getenv("API_PORT", "443") # Ensure .env has API_PORT=443
+    port = int(port_str)
 
     reload_flag = os.getenv("DEV_MODE", "false").lower() == "true"
 
-    # Uvicorn's log level should be derived from the application's log level
-    # Ensure it's a valid Uvicorn log level string
     uvicorn_log_levels = ["critical", "error", "warning", "info", "debug", "trace"]
     uvicorn_log_level = log_level_str.lower()
     if uvicorn_log_level not in uvicorn_log_levels:
-        logger.warning(f"LOG_LEVEL '{log_level_str}' not directly mappable to Uvicorn. Defaulting Uvicorn log level to 'info'.")
+        logger.warning(f"LOG_LEVEL '{log_level_str}' not recognized by Uvicorn. Defaulting to 'info'.")
         uvicorn_log_level = "info"
 
-    logger.info(f"Starting Uvicorn server for 'app.main:app' on {host}:{port}")
-    logger.info(f"Uvicorn log level: {uvicorn_log_level}, Reload: {reload_flag}")
+    # --- SSL Configuration for Uvicorn ---
+    ssl_keyfile_path = "/app/certs/salesforcechain.key"    # Path inside the container
+    ssl_certfile_path = "/app/certs/salesforcechain.crt" # Path inside the container
 
-    uvicorn.run(
-        "app.main:app",  # Points to the FastAPI app instance in app/main.py
-        host=host,
-        port=port,
-        log_level=uvicorn_log_level,
-        reload=reload_flag
-    )
+    ssl_params = {} # Changed variable name to avoid conflict if 'ssl_config' is used elsewhere
+    if os.path.exists(ssl_keyfile_path) and os.path.exists(ssl_certfile_path):
+        logger.info(f"SSL key and cert files found. Uvicorn will attempt to start with HTTPS.")
+        ssl_params = {
+            "ssl_keyfile": ssl_keyfile_path,
+            "ssl_certfile": ssl_certfile_path
+        }
+    else:
+        logger.error(f"SSL keyfile ('{ssl_keyfile_path}') or certfile ('{ssl_certfile_path}') not found. Cannot start HTTPS server.")
+        exit(1) # Exit if certs are mandatory for HTTPS
+    # --- End SSL Configuration ---
+
+    if ssl_params: # Check if SSL parameters are set
+        logger.info(f"Starting Uvicorn HTTPS server for 'app.main:app' on {host}:{port}")
+        logger.info(f"Uvicorn log level: {uvicorn_log_level}, Reload: {reload_flag}")
+
+        uvicorn.run(
+            "app.main:app",  # Assuming your FastAPI app instance is 'app' in 'app/main.py'
+            host=host,
+            port=port,
+            log_level=uvicorn_log_level,
+            reload=reload_flag,
+            **ssl_params # Pass the SSL parameters
+        )
+    else:
+        logger.error("Uvicorn server not started due to missing SSL configuration.")
