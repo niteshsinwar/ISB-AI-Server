@@ -47,12 +47,11 @@ class DocumentTextExtractor:
         "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
         "webp": "image/webp", "gif": "image/gif", "bmp": "image/bmp",
         "heic": "image/heic", "tif": "image/tiff", "tiff": "image/tiff",
-        "pdf": "application/pdf" # Added PDF for completeness
+        "pdf": "application/pdf"
     }
     OCR_DPI = 200
-    OCR_FORMAT = 'png' # Gemini Vision generally prefers PNG, JPEG
+    OCR_FORMAT = 'png'
     MIN_MEANINGFUL_TEXT_LENGTH = 20
-    # MAX_CONCURRENT_OCR_PAGES is now from config
 
     def __init__(self):
         self.gemini_model: Optional[genai.GenerativeModel] = None
@@ -69,46 +68,41 @@ class DocumentTextExtractor:
             logger.info(f"Gemini Vision model for OCR initialized successfully ('{GEMINI_MODEL_NAME}').")
         except Exception as e:
             logger.error(f"Failed to initialize Gemini model ('{GEMINI_MODEL_NAME}') for OCR: {e}", exc_info=True)
-            self.gemini_model = None # Ensure it's None on failure
+            self.gemini_model = None
 
     def _decode_base64_file(self, file_base64_data: str) -> Tuple[bool, bytes, str]:
         if not file_base64_data:
             return False, b'', "No file data provided (base64 string is empty)"
         try:
-            # Ensure padding is correct if necessary (though b64decode often handles this)
-            # missing_padding = len(file_base64_data) % 4
-            # if missing_padding:
-            #     file_base64_data += '=' * (4 - missing_padding)
-            file_bytes = base64.b64decode(file_base64_data, validate=True) # Validate for stricter checking
-            if not file_bytes: # Should not happen if validate=True and data is non-empty, but good check
+            file_bytes = base64.b64decode(file_base64_data, validate=True)
+            if not file_bytes:
                 return False, b'', "Base64 decoded to empty data"
             return True, file_bytes, ""
-        except base64.binascii.Error as e: # More specific error for decoding issues
+        except base64.binascii.Error as e:
             logger.error(f"Base64 decoding error: {e}", exc_info=True)
             return False, b'', f"Invalid base64 data: {str(e)}"
-        except Exception as e: # Catch-all for other unexpected errors
+        except Exception as e:
             logger.error(f"Unexpected error during base64 decoding: {e}", exc_info=True)
             return False, b'', f"Unexpected error decoding base64: {str(e)}"
 
-
     def _create_document_info(self, file_bytes: bytes, extension: str) -> DocumentInfo:
         size_kb = len(file_bytes) / 1024.0
-        ext_lower = extension.lower().lstrip('.') # Ensure no leading dot and lower case
+        ext_lower = extension.lower().lstrip('.')
         mime_type = self.MIME_TYPE_MAP.get(ext_lower)
         if not mime_type:
-             logger.warning(f"Could not determine MIME type for extension '{ext_lower}'. OCR might fail for images if MIME type is crucial.")
+             logger.warning(f"Could not determine MIME type for extension '{ext_lower}'.")
         return DocumentInfo(
             file_bytes=file_bytes, extension=ext_lower,
             size_kb=size_kb, mime_type=mime_type
         )
 
-    async def _extract_pdf_text_direct(self, doc_info: DocumentInfo) -> ExtractionResult:
-        logger.info("Attempting direct PDF text extraction...")
+    def _sync_extract_pdf_text(self, file_bytes: bytes) -> Tuple[bool, str, int, bool]:
+        """Synchronous helper for PyPDF processing to run in a thread."""
         try:
-            pdf_reader = PdfReader(io.BytesIO(doc_info.file_bytes))
+            pdf_reader = PdfReader(io.BytesIO(file_bytes))
             page_count = len(pdf_reader.pages)
             if page_count == 0:
-                return ExtractionResult(success=False, text="", error_message="PDF contains no pages (PyPDF)", page_count=0)
+                return False, "PDF contains no pages (PyPDF)", 0, False
 
             extracted_pages = []
             meaningful_text_found = False
@@ -126,20 +120,35 @@ class DocumentTextExtractor:
                     extracted_pages.append(f"[Error on page {i+1}: PyPDF extraction failed]")
             
             full_text = "\n\n--- Page Break (Direct) ---\n\n".join(extracted_pages)
-            if meaningful_text_found:
-                logger.info(f"Successfully extracted text from {page_count} pages using direct PDF method.")
-                return ExtractionResult(success=True, text=full_text, method=ExtractionMethod.DIRECT_PDF, page_count=page_count)
-            else: # No meaningful text, but pages were processed
-                logger.info("PyPDF: No meaningful text found via direct extraction. Text might be image-based or empty.")
-                return ExtractionResult(success=False, text=full_text, # Return what was extracted (e.g. error markers)
-                                        error_message="No meaningful text found via direct PDF extraction (document might be image-based or empty)", 
-                                        page_count=page_count) # page_count is important for OCR fallback
+            return True, full_text, page_count, meaningful_text_found
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"PyPDF processing error: {error_msg}", exc_info=True)
+            logger.error(f"PyPDF processing error in thread: {error_msg}", exc_info=True)
             if "PdfReadError" in str(type(e)) or "EOF marker not found" in error_msg or "Invalid PDF" in error_msg:
                 error_msg = f"Corrupted or invalid PDF structure: {error_msg}"
-            return ExtractionResult(success=False, text="", error_message=f"PDF processing error (direct): {error_msg}", page_count=0)
+            return False, f"PDF processing error (direct): {error_msg}", 0, False
+
+    async def _extract_pdf_text_direct(self, doc_info: DocumentInfo) -> ExtractionResult:
+        logger.info("Attempting direct PDF text extraction in a background thread...")
+        
+        success, result_data, page_count, meaningful_text_found = await asyncio.to_thread(
+            self._sync_extract_pdf_text, doc_info.file_bytes
+        )
+
+        if not success:
+            return ExtractionResult(success=False, text="", error_message=result_data, page_count=page_count)
+
+        if meaningful_text_found:
+            logger.info(f"Successfully extracted text from {page_count} pages using direct PDF method.")
+            return ExtractionResult(success=True, text=result_data, method=ExtractionMethod.DIRECT_PDF, page_count=page_count)
+        else:
+            logger.info("PyPDF: No meaningful text found via direct extraction. Text might be image-based or empty.")
+            return ExtractionResult(
+                success=False,
+                text=result_data,
+                error_message="No meaningful text found via direct PDF extraction (document might be image-based or empty)",
+                page_count=page_count
+            )
 
     async def _extract_text_from_image_with_gemini(self, image_bytes: bytes, mime_type: str, page_num: int = 0) -> Tuple[bool, str, str]:
         if not self.gemini_model:
@@ -150,9 +159,6 @@ class DocumentTextExtractor:
             logger.info(f"Processing {page_id} with Gemini Vision ({mime_type}, {len(image_bytes)//1024} KB)")
             image_part = {"mime_type": mime_type, "data": image_bytes}
             
-            # Make the API call with a timeout
-            # Note: generate_content_async might not directly support a timeout argument in all SDK versions.
-            # If not, you might need asyncio.wait_for. For now, assuming SDK handles reasonable timeouts.
             response = await self.gemini_model.generate_content_async([self.ocr_prompt, image_part])
 
             if response.parts:
@@ -163,24 +169,22 @@ class DocumentTextExtractor:
                     return True, processed_text, ""
                 else:
                     logger.info(f"No significant text found in {page_id} by Gemini (or model indicated 'NO_TEXT_FOUND').")
-                    return True, "", "" # Success, but no text
+                    return True, "", ""
             elif hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
                 block_reason = response.prompt_feedback.block_reason
                 error_msg = f"Content blocked by Gemini for {page_id}: {block_reason}"
                 logger.warning(error_msg)
                 return False, "", error_msg
-            else: # Unexpected response
+            else:
                 candidate_info = str(response.candidates[0])[:200] if hasattr(response, 'candidates') and response.candidates else 'No candidates'
                 logger.warning(f"Unexpected Gemini response for {page_id}. No parts or block reason. Candidate: {candidate_info}")
                 return False, "", f"Unexpected API response from Gemini for {page_id}"
         except Exception as e:
             error_msg = f"Gemini API error for {page_id}: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            # Check for specific API errors if possible (e.g., quota, auth)
             if "API key not valid" in str(e): error_msg = "Gemini API Key not valid. Please check configuration."
             elif "Quota" in str(e): error_msg = "Gemini API Quota exceeded."
             return False, "", error_msg
-
 
     async def _extract_pdf_text_ocr(self, doc_info: DocumentInfo, pypdf_page_count: int) -> ExtractionResult:
         logger.info("Attempting PDF OCR extraction...")
@@ -188,11 +192,12 @@ class DocumentTextExtractor:
             return ExtractionResult(success=False, text="", error_message="OCR unavailable: Gemini model not initialized")
 
         page_count_for_conversion = pypdf_page_count
-        if pypdf_page_count <= 0: # If PyPDF couldn't determine pages, try Poppler's pdfinfo
-            logger.info("PyPDF found 0 pages or failed. Trying Poppler's pdfinfo_from_bytes for page count.")
+        if pypdf_page_count <= 0:
+            logger.info("PyPDF found 0 pages or failed. Trying Poppler's pdfinfo in a background thread.")
             try:
-                # pdfinfo_from_bytes can be slow; consider a timeout
-                pdf_info_meta = pdfinfo_from_bytes(doc_info.file_bytes, timeout=30)
+                pdf_info_meta = await asyncio.to_thread(
+                    pdfinfo_from_bytes, doc_info.file_bytes, timeout=30
+                )
                 poppler_page_count = pdf_info_meta.get('Pages', 0)
                 if isinstance(poppler_page_count, str) and poppler_page_count.isdigit():
                     poppler_page_count = int(poppler_page_count)
@@ -207,25 +212,28 @@ class DocumentTextExtractor:
                 logger.error(f"Poppler (pdfinfo_from_bytes) failed: {e}. Cannot determine page count for OCR.", exc_info=True)
                 return ExtractionResult(success=False, text="", error_message=f"Failed to get PDF info for OCR (Poppler pdfinfo error): {e}")
         
-        if page_count_for_conversion == 0: # Final check
+        if page_count_for_conversion == 0:
              return ExtractionResult(success=False, text="", error_message="PDF has no pages for OCR processing")
 
         try:
-            logger.info(f"Converting {page_count_for_conversion} PDF page(s) to images for OCR (DPI: {self.OCR_DPI}, Format: {self.OCR_FORMAT})...")
-            # pdf2image timeout: e.g., 15 seconds per page, plus a base
+            logger.info(f"Converting {page_count_for_conversion} PDF page(s) to images for OCR in a background thread...")
             conversion_timeout = 15 + (page_count_for_conversion * 10)
-            images = convert_from_bytes(
-                doc_info.file_bytes, fmt=self.OCR_FORMAT, dpi=self.OCR_DPI,
-                thread_count=min(os.cpu_count() or 1, 4), # Ensure at least 1 thread
+            images = await asyncio.to_thread(
+                convert_from_bytes,
+                doc_info.file_bytes,
+                fmt=self.OCR_FORMAT,
+                dpi=self.OCR_DPI,
+                thread_count=min(os.cpu_count() or 1, 4),
                 timeout=conversion_timeout
             )
-            if not images: # Should not happen if page_count_for_conversion > 0, but Poppler might fail silently
+            if not images:
                 logger.warning("Poppler (convert_from_bytes) returned no images despite expected pages.")
                 return ExtractionResult(success=False, text="", error_message="Failed to convert PDF to images (Poppler returned no images)")
-        except Exception as e: # Catch Poppler conversion errors (e.g., PDFTooBigError, PDFSyntaxError)
+        except Exception as e:
             logger.error(f"Poppler (convert_from_bytes) failed during PDF to image conversion: {e}", exc_info=True)
             return ExtractionResult(success=False, text="", error_message=f"PDF to image conversion error (Poppler): {e}")
 
+        # --- The rest of the OCR logic is already async-friendly and remains the same ---
         ocr_results, warnings_list = [], []
         actual_images_converted = len(images)
         logger.info(f"Successfully converted {actual_images_converted} PDF page(s) to images. Starting OCR (Batch size: {MAX_CONCURRENT_OCR_PAGES}).")
@@ -237,9 +245,8 @@ class DocumentTextExtractor:
                 page_num_actual = i + j + 1
                 try:
                     img_buffer = io.BytesIO()
-                    pil_image.save(img_buffer, format='PNG') # Ensure format matches expected MIME for Gemini
+                    pil_image.save(img_buffer, format='PNG')
                     img_bytes = img_buffer.getvalue()
-                    # Create task for _extract_text_from_image_with_gemini
                     task = self._extract_text_from_image_with_gemini(img_bytes, "image/png", page_num_actual)
                     tasks_with_pagenum.append({'page_num': page_num_actual, 'task': task})
                 except Exception as img_save_err:
@@ -249,31 +256,28 @@ class DocumentTextExtractor:
             if not tasks_with_pagenum: continue
 
             try:
-                # Gather results; return_exceptions=True allows individual task errors to be caught
                 gathered_page_results = await asyncio.gather(*[item['task'] for item in tasks_with_pagenum], return_exceptions=True)
-            except Exception as gather_e: # Should not happen with return_exceptions=True, but as safeguard
+            except Exception as gather_e:
                 logger.error(f"Unexpected error during asyncio.gather for OCR tasks (batch from page {tasks_with_pagenum[0]['page_num']}): {gather_e}", exc_info=True)
-                for item in tasks_with_pagenum: # Mark all in batch as failed due to gather error
+                for item in tasks_with_pagenum:
                     ocr_results.append(f"[Page {item['page_num']} OCR Batch Exception: {str(gather_e)}]")
                     warnings_list.append(f"Page {item['page_num']} OCR task failed in batch: {str(gather_e)}")
                 continue
 
-            # Process results from asyncio.gather
             for item_idx, result_or_exc in enumerate(gathered_page_results):
                 page_num_processed = tasks_with_pagenum[item_idx]['page_num']
-                if isinstance(result_or_exc, Exception): # If an individual task raised an exception
+                if isinstance(result_or_exc, Exception):
                     error_msg = f"OCR task for page {page_num_processed} failed: {str(result_or_exc)}"
-                    logger.error(error_msg, exc_info=result_or_exc) # Log with exc_info
+                    logger.error(error_msg, exc_info=result_or_exc)
                     ocr_results.append(f"[Page {page_num_processed} OCR Error: {str(result_or_exc)}]")
                     warnings_list.append(error_msg)
-                else: # Task completed, result_or_exc is the (success, text, error_msg) tuple
+                else:
                     success, text, error_msg_gemini = result_or_exc
                     if success and text:
                         ocr_results.append(text)
-                    elif error_msg_gemini: # Error from Gemini for this page
+                    elif error_msg_gemini:
                         ocr_results.append(f"[Page {page_num_processed} OCR Error: {error_msg_gemini}]")
                         warnings_list.append(f"Page {page_num_processed}: {error_msg_gemini}")
-                    # If success is True but text is empty, it's "NO_TEXT_FOUND", append nothing or placeholder if desired.
         
         meaningful_pages = [txt for txt in ocr_results if txt and not txt.startswith("[Page")]
         full_text_output = "\n\n--- Page Break (OCR) ---\n\n".join(ocr_results) if ocr_results else ""
@@ -283,7 +287,6 @@ class DocumentTextExtractor:
             return ExtractionResult(success=True, text=full_text_output, method=ExtractionMethod.OCR_GEMINI, page_count=actual_images_converted, warnings=warnings_list)
         else:
             logger.warning(f"OCR completed but no readable text found across {actual_images_converted} pages.")
-            # Even if no meaningful text, success might be False but text can contain error markers
             return ExtractionResult(success=False, text=full_text_output, 
                                     error_message="OCR completed but no readable text found", 
                                     page_count=actual_images_converted, warnings=warnings_list)
@@ -296,7 +299,7 @@ class DocumentTextExtractor:
 
         success, text, error_msg = await self._extract_text_from_image_with_gemini(doc_info.file_bytes, doc_info.mime_type)
         return ExtractionResult(
-            success=success and bool(text.strip()), # Success only if text is found
+            success=success and bool(text.strip()),
             text=text, method=ExtractionMethod.OCR_GEMINI if success and text.strip() else None,
             page_count=1, error_message=error_msg if not success or not text.strip() else None
         )
@@ -327,12 +330,11 @@ class DocumentTextExtractor:
                     result_text = ocr_result.text
                     if ocr_result.warnings: result_text += f"\n\n[OCR Warnings: {'; '.join(ocr_result.warnings)}]"
                     return result_text
-                else: # OCR also failed or found no text
+                else:
                     final_error_message = ocr_result.error_message or "No text found after direct and OCR attempts for PDF."
                     if direct_result.error_message and direct_result.error_message not in final_error_message:
                          final_error_message = f"Direct: {direct_result.error_message}; OCR: {final_error_message}"
                     logger.warning(f"PDF processing failed after direct and OCR: {final_error_message}")
-                    # Return OCR text if it has content (e.g., error markers), else the error message
                     return f"Error: {final_error_message}" if not ocr_result.text.strip() else ocr_result.text
 
             elif doc_info.extension in self.SUPPORTED_IMAGE_EXTENSIONS:
@@ -356,10 +358,10 @@ class DocumentTextExtractor:
 
 # --- Lifespan and Dependency Injection ---
 _extractor_instance: Optional[DocumentTextExtractor] = None
-_extractor_lock = asyncio.Lock() # Lock for initializing the singleton
+_extractor_lock = asyncio.Lock()
 
 @asynccontextmanager
-async def lifespan(app): # app parameter is conventional for FastAPI lifespan
+async def lifespan(app):
     """FastAPI lifespan context manager to initialize/cleanup the extractor."""
     global _extractor_instance
     async with _extractor_lock:
@@ -369,29 +371,18 @@ async def lifespan(app): # app parameter is conventional for FastAPI lifespan
         else:
             logger.info("DocumentTextExtractor instance already existed when lifespan started.")
     
-    # If you were to store it in app.state:
-    # app.state.text_extractor = _extractor_instance 
+    yield
     
-    yield # Application runs here
-    
-    # Cleanup if needed (not much for this class currently)
     logger.info("DocumentTextExtractor instance shutting down (if any cleanup actions were needed).")
-    # Optional: Clear instance on shutdown if strict re-creation is desired on next app start (e.g., for testing)
-    # async with _extractor_lock:
-    #     _extractor_instance = None
 
 async def get_text_extractor() -> DocumentTextExtractor:
     """Dependency injector to get the DocumentTextExtractor instance."""
     global _extractor_instance
     if _extractor_instance is None:
-        # This block should ideally not be hit if lifespan manager is used correctly.
-        # It acts as a fallback or for contexts where lifespan isn't managing the instance.
         async with _extractor_lock:
-            if _extractor_instance is None: # Double-check after acquiring lock
+            if _extractor_instance is None:
                 logger.warning(
-                    "DocumentTextExtractor instance was None when requested by 'get_text_extractor'. "
-                    "This might indicate the app lifespan manager didn't run or an issue with its setup. "
-                    "Creating a new instance now as a fallback."
+                    "DocumentTextExtractor instance was None when requested. Creating new instance as fallback."
                 )
                 _extractor_instance = DocumentTextExtractor()
     return _extractor_instance
@@ -402,5 +393,5 @@ async def extract_text_from_file(file_base64_data: str, file_extension: str) -> 
     Wrapper to use the DocumentTextExtractor instance.
     This is what was originally imported and used.
     """
-    extractor = await get_text_extractor() # Get the (ideally singleton) instance
+    extractor = await get_text_extractor()
     return await extractor.extract_text_from_file_data(file_base64_data, file_extension)

@@ -155,29 +155,50 @@ async def release_processing_slot():
             logger.warning("Attempted to release a processing slot when active_processing_slots was already 0.")
         logger.info(f"Processing slot released. Active slots: {_active_processing_slots}/{MAX_CONCURRENT_PROCESSING_SLOTS}")
 
-# --- Processing Status Management ---
-async def update_processing_status(app_id: str, status: str, job_id: str, client_fingerprint: str = "", error_message: Optional[str] = None):
+async def update_processing_status(
+    app_id: str, 
+    status: str, 
+    job_id: str, 
+    client_fingerprint: str = "", 
+    error_message: Optional[str] = None, 
+    detailed_summary: Optional[Dict[str, Any]] = None  # <-- ADDED
+):
+    """Updates the processing status for a given application ID."""
     async with _processing_lock:
         now = datetime.now(timezone.utc)
-        # Clean up old "completed" or "failed" entries
+        
+        # Clean up old "completed" or "failed" entries first
         keys_to_delete = [
             k for k, v in _application_processing_status.items()
-            if v["status"] in ["completed", "failed"] and \
-               (now - v["timestamp"]).total_seconds() > RECENTLY_PROCESSED_TTL_SECONDS
+            if v.get("status") in ["completed", "failed"] and \
+               (now - v.get("timestamp", now)).total_seconds() > RECENTLY_PROCESSED_TTL_SECONDS
         ]
         for k in keys_to_delete:
             if k in _application_processing_status:
                 del _application_processing_status[k]
         
+        # Get the existing entry to preserve the original creation timestamp
+        existing_entry = _application_processing_status.get(app_id, {})
+        
         status_entry: Dict[str, Any] = {
-            "status": status, "timestamp": now, "job_id": job_id,
-            "client_fingerprint": client_fingerprint # Store for reference
+            "status": status, 
+            "timestamp": now,  # This acts as the 'last_updated_at' timestamp
+            "job_id": job_id,
+            "client_fingerprint": client_fingerprint,
+            # If the job is new, set its creation time. If it exists, keep the original one.
+            "created_at": existing_entry.get("created_at", now) 
         }
+
         if error_message:
             status_entry["error_message"] = error_message
+        
+        # Add the new detailed summary to the state if it's provided
+        if detailed_summary:
+            status_entry["detailed_summary"] = detailed_summary
+
         _application_processing_status[app_id] = status_entry
         logger.info(f"Status for App ID {app_id} updated to {status} (Job: {job_id}, Client: {client_fingerprint[:8]}...). Error: {error_message or 'None'}")
-
+        
 async def get_processing_status(app_id: str) -> Optional[Dict[str, Any]]:
     async with _processing_lock:
         now = datetime.now(timezone.utc)
