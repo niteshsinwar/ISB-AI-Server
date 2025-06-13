@@ -1,4 +1,3 @@
-# project_root/app/schemas/responses.py
 """
 Pydantic models for API responses to ensure consistency, validation,
 and clear documentation.
@@ -39,7 +38,7 @@ class AnalyzeApplicationBodyRequest(BaseModel):
     record_id: str = Field(..., description="The 15 or 18 character ID of the Salesforce Application__c record.")
 
 class AnalyzeApplicationResponse(BaseModel):
-    request_id: str = Field(..., description="The unique ID for this analysis request (job_id).", alias="_id")
+    request_id: str = Field(..., description="The unique ID for this analysis request (job_id).")
     application_record_id: str = Field(..., description="The Salesforce ID of the application being processed.")
     status: str = Field(..., description="Confirms the request was accepted, e.g., 'processing_initiated'.")
     message: str = Field(..., description="A human-readable message about the request status.")
@@ -62,9 +61,8 @@ class JobStatusResponse(BaseModel):
 class QueueOverviewResponse(BaseModel):
     active_jobs: int = Field(..., description="Number of jobs currently in the 'processing' state.")
     tracked_jobs_total: int = Field(..., description="Total number of jobs being tracked (processing, completed, failed).")
-    status_counts: Dict[str, int] = Field(..., description="A breakdown of jobs by their status.")
     slot_utilization: Dict[str, Union[int, float]] = Field(..., description="Details on processing slot usage.")
-    recent_failed_jobs: List[JobStatusResponse] = Field(..., description="A list of the 5 most recently failed jobs for quick diagnosis.")
+    all_jobs: List[JobStatusResponse] = Field(..., description="A list of all jobs for detailed monitoring.")
 
 # --- Admin & Security Schemas ---
 
@@ -90,4 +88,3 @@ class UnblockClientResponse(BaseModel):
     message: str
     unblocked: bool = True
     previous_block_info: Dict[str, Any]
-

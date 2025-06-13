@@ -1,12 +1,11 @@
+# project_root/app/processors/education_processor.py
 import logging
 import json
 import asyncio
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, List
 
 from app.config import (
     EDUCATION_LOG_OBJECT_API_NAME,
-    EDUCATION_DETAIL_OBJECT_API_NAME,
-    APPLICATION_VERIFICATION_SUMMARY_OBJECT_API_NAME,
     MAX_SALESFORCE_REPORT_LENGTH
 )
 
@@ -18,79 +17,97 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 async def process_single_education_history_detail(
-    sf_service: 'SalesforceService',
+    sf_service: "SalesforceService",
     education_log_id: str,
     parent_application_id: str,
     item_index: Optional[int] = None
 ):
+    """
+    Processes a single Education History record and its document.
+    Raises ValueError on any processing failure.
+    """
     record_sobject_api_name_key_for_apex = EDUCATION_LOG_OBJECT_API_NAME
-    detail_sobject_context_name = EDUCATION_DETAIL_OBJECT_API_NAME
-
-    logger.info(f"Background task started for Education Log ID: {education_log_id} (App: {parent_application_id})")
+    logger.info(f"Starting Education History processing for Log ID: {education_log_id} (App: {parent_application_id})")
 
     from app.services.document_extraction_service import extract_text_from_file
     from app.crew.education_crew import EducationVerificationCrewOrchestrator
 
-    final_report_to_salesforce = f"Error: Initial processing failure for Education Log ID {education_log_id}."
-    actual_education_detail_id: Optional[str] = None
+    # 1. Fetch data from Salesforce
+    details: Optional[Dict[str, Any]] = await asyncio.to_thread(
+        sf_service.get_record_detail_from_apex,
+        education_log_id,
+        record_sobject_api_name_key_for_apex
+    )
+    if not details:
+        raise ValueError("Failed to receive details from Salesforce API.")
 
-    try:
-        details: Optional[Dict[str, Any]] = await asyncio.to_thread(
-            sf_service.get_record_detail_from_apex,
-            education_log_id,
-            record_sobject_api_name_key_for_apex
-        )
+    record_data = details.get("recordData")
+    document_payload = details.get("documentPayload")
 
-        if not details:
-            final_report_to_salesforce = "Error: No details received from the data API."
-        else:
-            record_data = details.get("recordData")
-            document_payload = details.get("documentPayload")
+    if not record_data:
+        raise ValueError("Salesforce Education History data was missing in API response.")
 
-            if not record_data:
-                final_report_to_salesforce = f"Error: Salesforce {detail_sobject_context_name} data was missing."
-            else:
-                actual_education_detail_id = record_data.get("Id")
-                if not actual_education_detail_id:
-                    final_report_to_salesforce = f"Error: Could not identify underlying {detail_sobject_context_name} ID."
-                elif document_payload and isinstance(document_payload, dict):
-                    file_name = document_payload.get("fileName", "N/A")
-                    file_extension = document_payload.get("fileExtension")
-                    base64_data = document_payload.get("base64Data")
+    actual_education_detail_id = record_data.get("Id")
+    task_id_for_lookup = record_data.get('Task_Id')
+    dci_id_for_lookup = record_data.get('DocumentchecklistItem_Id')
 
-                    if base64_data and file_extension:
-                        document_text_string = await extract_text_from_file(base64_data, file_extension)
-                        if document_text_string.startswith("Error:"):
-                            final_report_to_salesforce = f"Verification Error (Education): Text extraction failed for '{file_name}'. Reason: {document_text_string}"
-                        elif document_text_string.startswith("Note: No text found"):
-                            final_report_to_salesforce = f"Verification Info (Education): No text found in document '{file_name}'."
-                        else:
-                            edu_crew = EducationVerificationCrewOrchestrator(record_data_dict=record_data, document_text=document_text_string)
-                            verification_report = await asyncio.to_thread(edu_crew.run)
-                            final_report_to_salesforce = str(verification_report) if verification_report is not None else "Error: Education Crew produced no report."
-                    else:
-                        final_report_to_salesforce = "Verification Info (Education): Document data missing in payload."
-                elif actual_education_detail_id:
-                    final_report_to_salesforce = "Verification Info (Education): No document found to verify against."
+    if not actual_education_detail_id:
+        raise ValueError("Could not identify the underlying EducationHistory__c ID from the payload.")
 
-        if len(final_report_to_salesforce) > MAX_SALESFORCE_REPORT_LENGTH:
-            final_report_to_salesforce = final_report_to_salesforce[:MAX_SALESFORCE_REPORT_LENGTH - 3] + "..."
+    # 2. Extract text from the document
+    if not document_payload or not isinstance(document_payload, dict):
+        raise ValueError("No document payload found to verify against.")
 
-        summary_name_id_part = actual_education_detail_id or education_log_id
-        summary_name = f"Education History Analysis ({item_index})" if item_index is not None else f"Education History Analysis - {summary_name_id_part}"
+    file_name = document_payload.get("fileName", "N/A")
+    file_extension = document_payload.get("fileExtension")
+    base64_data = document_payload.get("base64Data")
+
+    if not base64_data or not file_extension:
+        raise ValueError("Document data (base64) or file extension missing in payload.")
         
-        if actual_education_detail_id:
-            await asyncio.to_thread(
-                sf_service.upsert_verification_summary,
-                application_id=parent_application_id,
-                report_content=final_report_to_salesforce,
-                name_value=summary_name,
-                education_history_id=actual_education_detail_id
-            )
-            logger.info(f"Successfully triggered AVS update for Education (Detail ID: {actual_education_detail_id}).")
-        else:
-            logger.error(f"Cannot update AVS for Education Log {education_log_id} because detail ID is missing.")
+    document_text: str | List[str] = await extract_text_from_file(base64_data, file_extension)
+    
+    # FIX: Handle cases where the extractor returns a list of strings
+    if isinstance(document_text, list):
+        document_text = "\n\n--- Page Break ---\n\n".join(document_text)
 
-    except Exception as e:
-        logger.error(f"Unexpected error for Education Log ID {education_log_id}: {e}", exc_info=True)
+    if document_text.startswith("Error:") or "No text found" in document_text:
+        raise ValueError(f"Text extraction failed for '{file_name}': {document_text}")
 
+    # 3. Run the verification crew
+    edu_crew = EducationVerificationCrewOrchestrator(record_data, document_text)
+    report_dict = await asyncio.to_thread(edu_crew.run)
+
+    field_summary_report = report_dict.get('field_comparison_summary')
+    overall_feedback_report = report_dict.get('overall_feedback')
+    confidence_report = report_dict.get('confidence_range')
+    
+    if not all([field_summary_report, overall_feedback_report, confidence_report is not None]):
+        raise ValueError("Crew failed to return a valid report. Check crew logs for details.")
+    
+    if len(field_summary_report) > MAX_SALESFORCE_REPORT_LENGTH:
+        field_summary_report = field_summary_report[:MAX_SALESFORCE_REPORT_LENGTH - 3] + "..."
+
+    # 4. Upsert the summary record to Salesforce
+    name_suffix = record_data.get('degreeLevel') or item_index or education_log_id
+    summary_name = f"Education Analysis ({name_suffix})"
+
+    summary_id = await asyncio.to_thread(
+        sf_service.upsert_verification_summary,
+        application_id=parent_application_id,
+        report_content=field_summary_report,
+        name_value=summary_name,
+        overall_feedback=overall_feedback_report,
+        confidence_range=confidence_report,
+        education_history_id=actual_education_detail_id
+    )
+    if not summary_id:
+        raise ValueError(f"Failed to upsert Application_Verification_Summary__c for Education History ID {actual_education_detail_id}.")
+        
+    logger.info(f"Upserted AVS {summary_id} for Education {actual_education_detail_id}. Linking to related items.")
+    
+    # 5. Link the summary to other items (Task, DCI)
+    await asyncio.to_thread(
+        sf_service.link_summary_to_related_items,
+        summary_id, task_id_for_lookup, dci_id_for_lookup, overall_feedback_report
+    )

@@ -9,7 +9,7 @@ from crewai import Agent, Task, Crew, Process
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Import shared configurations
-from app.config import GOOGLE_API_KEY, GEMINI_MODEL_NAME
+from app.config import GOOGLE_API_KEY, MODEL_TEXT_EXTRACTION
 
 logger = logging.getLogger(__name__)
 
@@ -18,15 +18,15 @@ gemini_llm_document_crew = None
 if GOOGLE_API_KEY:
     try:
         gemini_llm_document_crew = ChatGoogleGenerativeAI(
-            model=GEMINI_MODEL_NAME,
+            model=MODEL_TEXT_EXTRACTION,
             temperature=0.1,  # Very low for maximum consistency and accuracy
             max_tokens=8192,  # Maximum context utilization
             top_p=0.8,  # Focused but not overly restrictive
             google_api_key=GOOGLE_API_KEY,
         )
-        logger.info(f"Enhanced DocumentExtractionCrew LLM initialized with model: {GEMINI_MODEL_NAME}")
+        logger.info(f"Enhanced DocumentExtractionCrew LLM initialized with model: {MODEL_TEXT_EXTRACTION}")
     except Exception as e:
-        logger.error(f"Failed to initialize enhanced LLM for DocumentExtractionCrew ({GEMINI_MODEL_NAME}): {e}", exc_info=True)
+        logger.error(f"Failed to initialize enhanced LLM for DocumentExtractionCrew ({MODEL_TEXT_EXTRACTION}): {e}", exc_info=True)
         gemini_llm_document_crew = None
 else:
     logger.critical("DOCUMENT_CREW: GOOGLE_API_KEY environment variable not set. LLM will not be available.")

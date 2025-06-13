@@ -1,11 +1,11 @@
+# project_root/app/processors/test_score_processor.py
 import logging
 import json
 import asyncio
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, List
 
 from app.config import (
-    TEST_SCORE_OBJECT_API_NAME, 
-    APPLICATION_VERIFICATION_SUMMARY_OBJECT_API_NAME,
+    TEST_SCORE_OBJECT_API_NAME,
     MAX_SALESFORCE_REPORT_LENGTH
 )
 
@@ -17,70 +17,91 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 async def process_single_test_score_detail(
-    sf_service: 'SalesforceService',
+    sf_service: "SalesforceService",
     test_score_id: str,
     parent_application_id: str,
     item_index: Optional[int] = None
 ):
+    """
+    Processes a single Test Score record and its document.
+    Raises ValueError on any processing failure.
+    """
     record_sobject_api_name = TEST_SCORE_OBJECT_API_NAME
-    record_type_log_name = "TestScore"
-    
-    logger.info(f"Background task started for {record_type_log_name} ID: {test_score_id} (App: {parent_application_id})")
+    logger.info(f"Starting Test Score processing for ID: {test_score_id} (App: {parent_application_id})")
 
     from app.services.document_extraction_service import extract_text_from_file 
     from app.crew.test_score_crew import TestScoreVerificationCrewOrchestrator
 
-    final_report_to_salesforce = f"Error: Initial processing failure for {record_type_log_name} ID {test_score_id}."
+    # 1. Fetch data from Salesforce
+    details: Optional[Dict[str, Any]] = await asyncio.to_thread(
+        sf_service.get_record_detail_from_apex, test_score_id, record_sobject_api_name
+    )
+    if not details:
+        raise ValueError("Failed to receive details from Salesforce API for Test Score.")
 
-    try:
-        details: Optional[Dict[str, Any]] = await asyncio.to_thread(
-            sf_service.get_record_detail_from_apex, test_score_id, record_sobject_api_name
-        )
+    record_data = details.get("recordData")
+    document_payload = details.get("documentPayload")
 
-        if not details:
-            final_report_to_salesforce = f"Error: No details received from the data API for {record_type_log_name}."
-        else:
-            record_data = details.get("recordData")
-            document_payload = details.get("documentPayload")
+    if not record_data:
+        raise ValueError("Salesforce Test Score data was missing in API response.")
 
-            if not record_data:
-                final_report_to_salesforce = f"Error: Salesforce {record_type_log_name} record data was missing."
-            elif document_payload and isinstance(document_payload, dict):
-                file_name = document_payload.get("fileName", "N/A")
-                file_extension = document_payload.get("fileExtension")
-                base64_data = document_payload.get("base64Data")
+    task_id_for_lookup = record_data.get('Task_Id')
+    dci_id_for_lookup = record_data.get('DocumentchecklistItem_Id')
 
-                if base64_data and file_extension:
-                    document_text_string = await extract_text_from_file(base64_data, file_extension)
-                    if document_text_string.startswith("Error:"):
-                        final_report_to_salesforce = f"Verification Error ({record_type_log_name}): Text extraction failed for '{file_name}'. Reason: {document_text_string}"
-                    elif document_text_string.startswith("Note: No text found"):
-                        final_report_to_salesforce = f"Verification Info ({record_type_log_name}): No text found in document '{file_name}'."
-                    else:
-                        ts_crew = TestScoreVerificationCrewOrchestrator(
-                            record_data_dict=record_data,
-                            document_text=document_text_string
-                        )
-                        verification_report = await asyncio.to_thread(ts_crew.run)
-                        final_report_to_salesforce = str(verification_report) if verification_report is not None else f"Error: {record_type_log_name} Crew produced no report."
-                else:
-                    final_report_to_salesforce = f"Verification Info ({record_type_log_name}): Document data missing in payload."
-            else:
-                final_report_to_salesforce = f"Verification Info ({record_type_log_name}): No document found to verify against."
+    # 2. Extract text from the document
+    if not document_payload or not isinstance(document_payload, dict):
+        raise ValueError("No document payload found to verify against.")
 
-        if len(final_report_to_salesforce) > MAX_SALESFORCE_REPORT_LENGTH:
-            final_report_to_salesforce = final_report_to_salesforce[:MAX_SALESFORCE_REPORT_LENGTH - 3] + "..."
+    file_name = document_payload.get("fileName", "N/A")
+    file_extension = document_payload.get("fileExtension")
+    base64_data = document_payload.get("base64Data")
 
-        summary_name = f"Test Score Analysis ({item_index})" if item_index is not None else f"Test Score Analysis - {test_score_id}"
+    if not base64_data or not file_extension:
+        raise ValueError("Document data (base64) or file extension missing in payload.")
         
-        await asyncio.to_thread(
-            sf_service.upsert_verification_summary,
-            application_id=parent_application_id,
-            report_content=final_report_to_salesforce,
-            name_value=summary_name,
-            test_id=test_score_id
-        )
-        logger.info(f"Successfully triggered AVS update for Test Score ID: {test_score_id}.")
+    document_text: str | List[str] = await extract_text_from_file(base64_data, file_extension)
 
-    except Exception as e:
-        logger.error(f"Unexpected error in main processing for {record_type_log_name} ID {test_score_id}: {e}", exc_info=True)
+    # FIX: Handle cases where the extractor returns a list of strings
+    if isinstance(document_text, list):
+        document_text = "\n\n--- Page Break ---\n\n".join(document_text)
+
+    if document_text.startswith("Error:") or "No text found" in document_text:
+        raise ValueError(f"Text extraction failed for '{file_name}': {document_text}")
+
+    # 3. Run the verification crew
+    ts_crew = TestScoreVerificationCrewOrchestrator(record_data, document_text)
+    report_dict = await asyncio.to_thread(ts_crew.run)
+
+    field_summary_report = report_dict.get('field_comparison_summary')
+    overall_feedback_report = report_dict.get('overall_feedback')
+    confidence_report = report_dict.get('confidence_range')
+
+    if not all([field_summary_report, overall_feedback_report, confidence_report is not None]):
+        raise ValueError("Crew failed to return a valid report. Check crew logs for details.")
+
+    if len(field_summary_report) > MAX_SALESFORCE_REPORT_LENGTH:
+        field_summary_report = field_summary_report[:MAX_SALESFORCE_REPORT_LENGTH - 3] + "..."
+
+    # 4. Upsert the summary record to Salesforce
+    name_suffix = record_data.get('RecordTypeName__c') or item_index or test_score_id
+    summary_name = f"Test Score Analysis ({name_suffix})"
+    
+    summary_id = await asyncio.to_thread(
+        sf_service.upsert_verification_summary,
+        application_id=parent_application_id,
+        report_content=field_summary_report,
+        name_value=summary_name,
+        overall_feedback=overall_feedback_report,
+        confidence_range=confidence_report,
+        test_id=test_score_id
+    )
+    if not summary_id:
+        raise ValueError(f"Failed to upsert Application_Verification_Summary__c for Test Score ID {test_score_id}.")
+        
+    logger.info(f"Upserted AVS {summary_id} for Test Score {test_score_id}. Linking to related items.")
+    
+    # 5. Link the summary to other items (Task, DCI)
+    await asyncio.to_thread(
+        sf_service.link_summary_to_related_items,
+        summary_id, task_id_for_lookup, dci_id_for_lookup, overall_feedback_report
+    )

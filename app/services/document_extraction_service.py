@@ -1,397 +1,356 @@
 # project_root/app/services/document_extraction_service.py
+
 import base64
 import io
 import os
 import asyncio
-from typing import Optional, List, Dict, Any, Tuple
-from dataclasses import dataclass, field
-from enum import Enum
 import logging
+from typing import Optional, List, Tuple, Dict, Any
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 from pypdf import PdfReader
-import google.generativeai as genai
-from PIL import Image
-from pdf2image import convert_from_bytes, pdfinfo_from_bytes # Poppler dependency
+from PIL import Image, ImageOps
+from pdf2image import convert_from_bytes
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
 
 from app.config import (
-    GOOGLE_API_KEY, GEMINI_MODEL_NAME, TEXT_EXTRACTION_OCR_PROMPT,
-    MAX_CONCURRENT_OCR_PAGES
+    GOOGLE_API_KEY, MODEL_TEXT_EXTRACTION, MODEL_DATA_ANALYSIS,
+    RAW_OCR_PROMPT, DATA_STRUCTURING_PROMPT
 )
 
 logger = logging.getLogger(__name__)
 
-class ExtractionMethod(Enum):
-    DIRECT_PDF = "direct_pdf"
-    OCR_GEMINI = "ocr_gemini"
+# --- Optimized Single-Pass OCR Implementation ---
 
-@dataclass
-class ExtractionResult:
-    success: bool
-    text: str
-    method: Optional[ExtractionMethod] = None
-    page_count: int = 0
-    error_message: Optional[str] = None
-    warnings: List[str] = field(default_factory=list)
-
-@dataclass
-class DocumentInfo:
-    file_bytes: bytes
-    extension: str
-    size_kb: float
-    mime_type: Optional[str] = None
-
-class DocumentTextExtractor:
-    SUPPORTED_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "gif", "bmp", "heic", "tif", "tiff"}
-    MIME_TYPE_MAP = {
-        "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
-        "webp": "image/webp", "gif": "image/gif", "bmp": "image/bmp",
-        "heic": "image/heic", "tif": "image/tiff", "tiff": "image/tiff",
-        "pdf": "application/pdf"
-    }
-    OCR_DPI = 200
-    OCR_FORMAT = 'png'
-    MIN_MEANINGFUL_TEXT_LENGTH = 20
-
+class OptimizedGeminiProcessor:
+    """Optimized single-pass Gemini processor for faster OCR"""
+    
     def __init__(self):
-        self.gemini_model: Optional[genai.GenerativeModel] = None
-        self.ocr_prompt: str = TEXT_EXTRACTION_OCR_PROMPT
-        self._initialize_gemini()
-
-    def _initialize_gemini(self):
-        if not GOOGLE_API_KEY:
-            logger.warning("GOOGLE_API_KEY not found. OCR functionality (Gemini) will be unavailable.")
-            return
-        try:
-            genai.configure(api_key=GOOGLE_API_KEY)
-            self.gemini_model = genai.GenerativeModel(GEMINI_MODEL_NAME)
-            logger.info(f"Gemini Vision model for OCR initialized successfully ('{GEMINI_MODEL_NAME}').")
-        except Exception as e:
-            logger.error(f"Failed to initialize Gemini model ('{GEMINI_MODEL_NAME}') for OCR: {e}", exc_info=True)
-            self.gemini_model = None
-
-    def _decode_base64_file(self, file_base64_data: str) -> Tuple[bool, bytes, str]:
-        if not file_base64_data:
-            return False, b'', "No file data provided (base64 string is empty)"
-        try:
-            file_bytes = base64.b64decode(file_base64_data, validate=True)
-            if not file_bytes:
-                return False, b'', "Base64 decoded to empty data"
-            return True, file_bytes, ""
-        except base64.binascii.Error as e:
-            logger.error(f"Base64 decoding error: {e}", exc_info=True)
-            return False, b'', f"Invalid base64 data: {str(e)}"
-        except Exception as e:
-            logger.error(f"Unexpected error during base64 decoding: {e}", exc_info=True)
-            return False, b'', f"Unexpected error decoding base64: {str(e)}"
-
-    def _create_document_info(self, file_bytes: bytes, extension: str) -> DocumentInfo:
-        size_kb = len(file_bytes) / 1024.0
-        ext_lower = extension.lower().lstrip('.')
-        mime_type = self.MIME_TYPE_MAP.get(ext_lower)
-        if not mime_type:
-             logger.warning(f"Could not determine MIME type for extension '{ext_lower}'.")
-        return DocumentInfo(
-            file_bytes=file_bytes, extension=ext_lower,
-            size_kb=size_kb, mime_type=mime_type
+        # Use faster model for OCR if available
+        self.llm = ChatGoogleGenerativeAI(
+            model=MODEL_TEXT_EXTRACTION,  # Consider using gemini-1.5-flash for speed
+            google_api_key=GOOGLE_API_KEY,
+            temperature=0.1,
+            # Add timeout and retry configurations
+            request_timeout=30.0,
+            max_retries=2
         )
-
-    def _sync_extract_pdf_text(self, file_bytes: bytes) -> Tuple[bool, str, int, bool]:
-        """Synchronous helper for PyPDF processing to run in a thread."""
-        try:
-            pdf_reader = PdfReader(io.BytesIO(file_bytes))
-            page_count = len(pdf_reader.pages)
-            if page_count == 0:
-                return False, "PDF contains no pages (PyPDF)", 0, False
-
-            extracted_pages = []
-            meaningful_text_found = False
-            for i, page in enumerate(pdf_reader.pages):
-                try:
-                    page_text = page.extract_text()
-                    if page_text:
-                        clean_text = page_text.strip()
-                        if clean_text:
-                            extracted_pages.append(clean_text)
-                            if len(clean_text) >= self.MIN_MEANINGFUL_TEXT_LENGTH:
-                                meaningful_text_found = True
-                except Exception as page_e:
-                    logger.warning(f"PyPDF: Error extracting text from page {i+1}: {page_e}")
-                    extracted_pages.append(f"[Error on page {i+1}: PyPDF extraction failed]")
-            
-            full_text = "\n\n--- Page Break (Direct) ---\n\n".join(extracted_pages)
-            return True, full_text, page_count, meaningful_text_found
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"PyPDF processing error in thread: {error_msg}", exc_info=True)
-            if "PdfReadError" in str(type(e)) or "EOF marker not found" in error_msg or "Invalid PDF" in error_msg:
-                error_msg = f"Corrupted or invalid PDF structure: {error_msg}"
-            return False, f"PDF processing error (direct): {error_msg}", 0, False
-
-    async def _extract_pdf_text_direct(self, doc_info: DocumentInfo) -> ExtractionResult:
-        logger.info("Attempting direct PDF text extraction in a background thread...")
         
-        success, result_data, page_count, meaningful_text_found = await asyncio.to_thread(
-            self._sync_extract_pdf_text, doc_info.file_bytes
-        )
-
-        if not success:
-            return ExtractionResult(success=False, text="", error_message=result_data, page_count=page_count)
-
-        if meaningful_text_found:
-            logger.info(f"Successfully extracted text from {page_count} pages using direct PDF method.")
-            return ExtractionResult(success=True, text=result_data, method=ExtractionMethod.DIRECT_PDF, page_count=page_count)
-        else:
-            logger.info("PyPDF: No meaningful text found via direct extraction. Text might be image-based or empty.")
-            return ExtractionResult(
-                success=False,
-                text=result_data,
-                error_message="No meaningful text found via direct PDF extraction (document might be image-based or empty)",
-                page_count=page_count
-            )
-
-    async def _extract_text_from_image_with_gemini(self, image_bytes: bytes, mime_type: str, page_num: int = 0) -> Tuple[bool, str, str]:
-        if not self.gemini_model:
-            return False, "", "OCR Error: Gemini model not available"
-
-        page_id = f"Page {page_num}" if page_num > 0 else "Image"
+        # Thread pool for CPU-intensive operations
+        self.executor = ThreadPoolExecutor(max_workers=4)
+    
+    def process_document_single_pass(self, image_bytes: bytes) -> str:
+        """Single-pass OCR with built-in structuring to reduce API calls"""
         try:
-            logger.info(f"Processing {page_id} with Gemini Vision ({mime_type}, {len(image_bytes)//1024} KB)")
-            image_part = {"mime_type": mime_type, "data": image_bytes}
+            # Combined prompt for OCR + structuring in one go
+            combined_prompt = f"""
+            {RAW_OCR_PROMPT}
             
-            response = await self.gemini_model.generate_content_async([self.ocr_prompt, image_part])
+            Additionally, after extracting the text, please structure it into clean Markdown format following these guidelines:
+            {DATA_STRUCTURING_PROMPT}
+            
+            Please provide the final structured Markdown output directly, not the raw OCR text.
+            """
+            
+            # Encode image to base64
+            encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+            image_url_content = f"data:image/png;base64,{encoded_image}"
 
-            if response.parts:
-                extracted_text = "".join(part.text for part in response.parts if hasattr(part, 'text'))
-                processed_text = extracted_text.strip()
-                if processed_text and processed_text.upper() != "NO_TEXT_FOUND":
-                    logger.info(f"Successfully extracted text from {page_id} using Gemini.")
-                    return True, processed_text, ""
-                else:
-                    logger.info(f"No significant text found in {page_id} by Gemini (or model indicated 'NO_TEXT_FOUND').")
-                    return True, "", ""
-            elif hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
-                block_reason = response.prompt_feedback.block_reason
-                error_msg = f"Content blocked by Gemini for {page_id}: {block_reason}"
-                logger.warning(error_msg)
-                return False, "", error_msg
-            else:
-                candidate_info = str(response.candidates[0])[:200] if hasattr(response, 'candidates') and response.candidates else 'No candidates'
-                logger.warning(f"Unexpected Gemini response for {page_id}. No parts or block reason. Candidate: {candidate_info}")
-                return False, "", f"Unexpected API response from Gemini for {page_id}"
-        except Exception as e:
-            error_msg = f"Gemini API error for {page_id}: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            if "API key not valid" in str(e): error_msg = "Gemini API Key not valid. Please check configuration."
-            elif "Quota" in str(e): error_msg = "Gemini API Quota exceeded."
-            return False, "", error_msg
-
-    async def _extract_pdf_text_ocr(self, doc_info: DocumentInfo, pypdf_page_count: int) -> ExtractionResult:
-        logger.info("Attempting PDF OCR extraction...")
-        if not self.gemini_model:
-            return ExtractionResult(success=False, text="", error_message="OCR unavailable: Gemini model not initialized")
-
-        page_count_for_conversion = pypdf_page_count
-        if pypdf_page_count <= 0:
-            logger.info("PyPDF found 0 pages or failed. Trying Poppler's pdfinfo in a background thread.")
-            try:
-                pdf_info_meta = await asyncio.to_thread(
-                    pdfinfo_from_bytes, doc_info.file_bytes, timeout=30
+            messages = [
+                HumanMessage(
+                    content=[
+                        {"type": "text", "text": combined_prompt},
+                        {"type": "image_url", "image_url": {"url": image_url_content}},
+                    ]
                 )
-                poppler_page_count = pdf_info_meta.get('Pages', 0)
-                if isinstance(poppler_page_count, str) and poppler_page_count.isdigit():
-                    poppler_page_count = int(poppler_page_count)
-                
-                if poppler_page_count > 0:
-                    page_count_for_conversion = poppler_page_count
-                    logger.info(f"Poppler (pdfinfo) reports {poppler_page_count} pages. Using this for conversion.")
-                else:
-                    logger.warning("Poppler (pdfinfo) also reports 0 pages. Cannot proceed with OCR.")
-                    return ExtractionResult(success=False, text="", error_message="PDF has no pages (PyPDF and Poppler report 0)")
-            except Exception as e:
-                logger.error(f"Poppler (pdfinfo_from_bytes) failed: {e}. Cannot determine page count for OCR.", exc_info=True)
-                return ExtractionResult(success=False, text="", error_message=f"Failed to get PDF info for OCR (Poppler pdfinfo error): {e}")
-        
-        if page_count_for_conversion == 0:
-             return ExtractionResult(success=False, text="", error_message="PDF has no pages for OCR processing")
-
-        try:
-            logger.info(f"Converting {page_count_for_conversion} PDF page(s) to images for OCR in a background thread...")
-            conversion_timeout = 15 + (page_count_for_conversion * 10)
-            images = await asyncio.to_thread(
-                convert_from_bytes,
-                doc_info.file_bytes,
-                fmt=self.OCR_FORMAT,
-                dpi=self.OCR_DPI,
-                thread_count=min(os.cpu_count() or 1, 4),
-                timeout=conversion_timeout
-            )
-            if not images:
-                logger.warning("Poppler (convert_from_bytes) returned no images despite expected pages.")
-                return ExtractionResult(success=False, text="", error_message="Failed to convert PDF to images (Poppler returned no images)")
-        except Exception as e:
-            logger.error(f"Poppler (convert_from_bytes) failed during PDF to image conversion: {e}", exc_info=True)
-            return ExtractionResult(success=False, text="", error_message=f"PDF to image conversion error (Poppler): {e}")
-
-        # --- The rest of the OCR logic is already async-friendly and remains the same ---
-        ocr_results, warnings_list = [], []
-        actual_images_converted = len(images)
-        logger.info(f"Successfully converted {actual_images_converted} PDF page(s) to images. Starting OCR (Batch size: {MAX_CONCURRENT_OCR_PAGES}).")
-
-        for i in range(0, actual_images_converted, MAX_CONCURRENT_OCR_PAGES):
-            batch_pil_images = images[i:i + MAX_CONCURRENT_OCR_PAGES]
-            tasks_with_pagenum = []
-            for j, pil_image in enumerate(batch_pil_images):
-                page_num_actual = i + j + 1
-                try:
-                    img_buffer = io.BytesIO()
-                    pil_image.save(img_buffer, format='PNG')
-                    img_bytes = img_buffer.getvalue()
-                    task = self._extract_text_from_image_with_gemini(img_bytes, "image/png", page_num_actual)
-                    tasks_with_pagenum.append({'page_num': page_num_actual, 'task': task})
-                except Exception as img_save_err:
-                    logger.error(f"Error processing image for page {page_num_actual} before OCR: {img_save_err}")
-                    warnings_list.append(f"Page {page_num_actual} pre-OCR processing error: {img_save_err}")
+            ]
             
-            if not tasks_with_pagenum: continue
+            start_time = time.time()
+            response = self.llm.invoke(messages)
+            processing_time = time.time() - start_time
+            
+            logger.info(f"Single-pass OCR completed in {processing_time:.2f} seconds")
+            return response.content
+            
+        except Exception as e:
+            logger.error(f"Error in optimized OCR: {e}", exc_info=True)
+            return f"OCR Error: {str(e)}"
 
-            try:
-                gathered_page_results = await asyncio.gather(*[item['task'] for item in tasks_with_pagenum], return_exceptions=True)
-            except Exception as gather_e:
-                logger.error(f"Unexpected error during asyncio.gather for OCR tasks (batch from page {tasks_with_pagenum[0]['page_num']}): {gather_e}", exc_info=True)
-                for item in tasks_with_pagenum:
-                    ocr_results.append(f"[Page {item['page_num']} OCR Batch Exception: {str(gather_e)}]")
-                    warnings_list.append(f"Page {item['page_num']} OCR task failed in batch: {str(gather_e)}")
-                continue
+# --- Streamlined Image Processing ---
+class FastImageProcessor:
+    """Lightweight image processing focused on speed"""
+    
+    @staticmethod
+    def quick_enhance(image_bytes: bytes) -> bytes:
+        """Quick image enhancement focused on OCR performance vs quality trade-off"""
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            
+            # Skip enhancement for already good quality images
+            width, height = img.size
+            if width >= 1200 and height >= 1200:
+                # Image is already high quality, return as-is
+                return image_bytes
+            
+            # Minimal processing for speed
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Only resize if image is very small
+            if width < 800 or height < 800:
+                scale_factor = max(800 / width, 800 / height)
+                new_size = (int(width * scale_factor), int(height * scale_factor))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+            
+            # Save with optimized settings
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=85, optimize=True)
+            return buffer.getvalue()
+            
+        except Exception as e:
+            logger.warning(f"Quick enhancement failed, using original: {e}")
+            return image_bytes
 
-            for item_idx, result_or_exc in enumerate(gathered_page_results):
-                page_num_processed = tasks_with_pagenum[item_idx]['page_num']
-                if isinstance(result_or_exc, Exception):
-                    error_msg = f"OCR task for page {page_num_processed} failed: {str(result_or_exc)}"
-                    logger.error(error_msg, exc_info=result_or_exc)
-                    ocr_results.append(f"[Page {page_num_processed} OCR Error: {str(result_or_exc)}]")
-                    warnings_list.append(error_msg)
-                else:
-                    success, text, error_msg_gemini = result_or_exc
-                    if success and text:
-                        ocr_results.append(text)
-                    elif error_msg_gemini:
-                        ocr_results.append(f"[Page {page_num_processed} OCR Error: {error_msg_gemini}]")
-                        warnings_list.append(f"Page {page_num_processed}: {error_msg_gemini}")
+# --- Optimized Main Service Class ---
+class FastDocumentExtractor:
+    def __init__(self):
+        self.image_processor = FastImageProcessor()
+        self.ocr_processor = OptimizedGeminiProcessor()
+
+    def _decode_base64(self, b64_data: str) -> Tuple[bool, bytes, str]:
+        """Fast base64 decoding with minimal validation"""
+        try:
+            if ',' in b64_data:
+                b64_data = b64_data.split(',', 1)[1]
+            return True, base64.b64decode(b64_data, validate=True), ""
+        except Exception as e:
+            return False, b'', f"Invalid base64: {str(e)}"
+
+    def _pdf_to_image_fast(self, pdf_bytes: bytes, page_num: int = 0) -> bytes:
+        """Fast PDF to image conversion for single page"""
+        try:
+            # Lower DPI for speed vs quality trade-off
+            images = convert_from_bytes(
+                pdf_bytes, 
+                dpi=200,  # Reduced from 300 for speed
+                fmt='jpeg',  # JPEG is faster than PNG
+                first_page=page_num + 1,
+                last_page=page_num + 1,  # Only convert needed page
+                thread_count=1,  # Reduce threading overhead for single page
+                poppler_path=None
+            )
+            
+            if not images:
+                raise ValueError("No images extracted from PDF")
+            
+            with io.BytesIO() as buf:
+                images[0].save(buf, format='JPEG', quality=85, optimize=True)
+                return buf.getvalue()
+            
+        except Exception as e:
+            logger.error(f"Fast PDF conversion failed: {e}")
+            raise e
+    
+    async def extract_text_fast(self, file_base64_data: str, file_extension: str) -> str:
+        """Optimized extraction method prioritizing speed"""
         
-        meaningful_pages = [txt for txt in ocr_results if txt and not txt.startswith("[Page")]
-        full_text_output = "\n\n--- Page Break (OCR) ---\n\n".join(ocr_results) if ocr_results else ""
-
-        if meaningful_pages:
-            logger.info(f"OCR extraction completed: {len(meaningful_pages)}/{actual_images_converted} pages yielded meaningful text.")
-            return ExtractionResult(success=True, text=full_text_output, method=ExtractionMethod.OCR_GEMINI, page_count=actual_images_converted, warnings=warnings_list)
-        else:
-            logger.warning(f"OCR completed but no readable text found across {actual_images_converted} pages.")
-            return ExtractionResult(success=False, text=full_text_output, 
-                                    error_message="OCR completed but no readable text found", 
-                                    page_count=actual_images_converted, warnings=warnings_list)
-
-    async def _extract_image_text(self, doc_info: DocumentInfo) -> ExtractionResult:
-        logger.info(f"Processing {doc_info.extension.upper()} image ({doc_info.size_kb:.1f} KB)")
-        if not doc_info.mime_type:
-            logger.warning(f"MIME type not found for image extension: {doc_info.extension}. Cannot OCR.")
-            return ExtractionResult(success=False, text="", error_message=f"Unsupported image format (no MIME type): {doc_info.extension}")
-
-        success, text, error_msg = await self._extract_text_from_image_with_gemini(doc_info.file_bytes, doc_info.mime_type)
-        return ExtractionResult(
-            success=success and bool(text.strip()),
-            text=text, method=ExtractionMethod.OCR_GEMINI if success and text.strip() else None,
-            page_count=1, error_message=error_msg if not success or not text.strip() else None
-        )
-
-    async def extract_text_from_file_data(self, file_base64_data: str, file_extension: str) -> str:
-        """ Main method to extract text. Returns text or "Error: ..." / "Note: ..." string. """
-        logger.info(f"Starting text extraction for {file_extension.upper()} file")
-        success_decode, file_bytes, error_msg_decode = self._decode_base64_file(file_base64_data)
-        if not success_decode:
-            logger.error(f"Base64 decoding failed for {file_extension}: {error_msg_decode}")
-            return f"Error: {error_msg_decode}"
-
-        doc_info = self._create_document_info(file_bytes, file_extension)
-        logger.info(f"Document: {doc_info.extension}, Size: {doc_info.size_kb:.1f} KB, MIME: {doc_info.mime_type}")
+        start_time = time.time()
+        
+        # Fast decode
+        success, file_bytes, error = self._decode_base64(file_base64_data)
+        if not success:
+            return f"Error: {error}"
 
         try:
-            if doc_info.extension == "pdf":
-                direct_result = await self._extract_pdf_text_direct(doc_info)
-                if direct_result.success and direct_result.text.strip():
-                    logger.info("Direct PDF extraction successful with meaningful text.")
-                    return direct_result.text
+            # Process different file types with speed optimizations
+            if file_extension.lower() == 'pdf':
+                # Only process first page by default for speed
+                image_bytes = await asyncio.to_thread(
+                    self._pdf_to_image_fast, 
+                    file_bytes, 
+                    0  # First page only
+                )
                 
-                logger.info(f"Direct PDF extraction found no meaningful text (or failed: {direct_result.error_message}). Attempting OCR. PyPDF page count: {direct_result.page_count}")
-                ocr_result = await self._extract_pdf_text_ocr(doc_info, direct_result.page_count)
+            elif file_extension.lower() in {"png", "jpg", "jpeg", "webp", "bmp", "tiff"}:
+                image_bytes = file_bytes
                 
-                if ocr_result.success and ocr_result.text.strip():
-                    logger.info("OCR PDF extraction successful with meaningful text.")
-                    result_text = ocr_result.text
-                    if ocr_result.warnings: result_text += f"\n\n[OCR Warnings: {'; '.join(ocr_result.warnings)}]"
-                    return result_text
-                else:
-                    final_error_message = ocr_result.error_message or "No text found after direct and OCR attempts for PDF."
-                    if direct_result.error_message and direct_result.error_message not in final_error_message:
-                         final_error_message = f"Direct: {direct_result.error_message}; OCR: {final_error_message}"
-                    logger.warning(f"PDF processing failed after direct and OCR: {final_error_message}")
-                    return f"Error: {final_error_message}" if not ocr_result.text.strip() else ocr_result.text
-
-            elif doc_info.extension in self.SUPPORTED_IMAGE_EXTENSIONS:
-                image_result = await self._extract_image_text(doc_info)
-                if image_result.success and image_result.text.strip():
-                    logger.info("Image OCR successful with meaningful text.")
-                    return image_result.text
-                elif image_result.success and not image_result.text.strip():
-                    logger.info("Image OCR successful but no text found in image.")
-                    return "Note: No text found in image by OCR."
-                else:
-                    logger.warning(f"Image OCR failed: {image_result.error_message}")
-                    return f"Error: {image_result.error_message or 'Image OCR failed to extract text.'}"
             else:
-                supported = ["pdf"] + sorted(list(self.SUPPORTED_IMAGE_EXTENSIONS))
-                logger.warning(f"Unsupported file format: {file_extension}")
-                return f"Error: Unsupported file format '{file_extension}'. Supported: {', '.join(supported)}"
-        except Exception as e:
-            logger.error(f"Unexpected error in extraction orchestration for {file_extension}: {e}", exc_info=True)
-            return f"Error: Unexpected processing error - {str(e)}"
+                return f"Error: Unsupported file format '{file_extension}'"
 
-# --- Lifespan and Dependency Injection ---
-_extractor_instance: Optional[DocumentTextExtractor] = None
-_extractor_lock = asyncio.Lock()
+            # Quick enhancement in thread pool
+            enhanced_image_bytes = await asyncio.to_thread(
+                self.image_processor.quick_enhance, 
+                image_bytes
+            )
+
+            # Single-pass OCR processing
+            result = await asyncio.to_thread(
+                self.ocr_processor.process_document_single_pass, 
+                enhanced_image_bytes
+            )
+            
+            total_time = time.time() - start_time
+            logger.info(f"Total extraction completed in {total_time:.2f} seconds")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Fast extraction failed: {e}", exc_info=True)
+            return f"Error: Fast extraction failed - {str(e)}"
+
+    async def extract_text_batch(self, file_data_list: List[Tuple[str, str]]) -> List[str]:
+        """Batch processing for multiple files with concurrency"""
+        try:
+            # Process multiple files concurrently
+            tasks = [
+                self.extract_text_fast(file_data, extension) 
+                for file_data, extension in file_data_list
+            ]
+            
+            # Limit concurrency to avoid overwhelming the API
+            semaphore = asyncio.Semaphore(3)  # Max 3 concurrent operations
+            
+            async def process_with_semaphore(task):
+                async with semaphore:
+                    return await task
+            
+            results = await asyncio.gather(*[
+                process_with_semaphore(task) for task in tasks
+            ])
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Batch processing failed: {e}", exc_info=True)
+            return [f"Error: Batch processing failed - {str(e)}"]
+
+    async def extract_pdf_pages_selective(self, file_base64_data: str, max_pages: int = 5) -> List[str]:
+        """Extract from PDF with page limit for speed"""
+        success, file_bytes, error = self._decode_base64(file_base64_data)
+        if not success:
+            return [f"Error: {error}"]
+
+        try:
+            # Quick page count check
+            reader = PdfReader(io.BytesIO(file_bytes))
+            total_pages = len(reader.pages)
+            pages_to_process = min(total_pages, max_pages)
+            
+            logger.info(f"Processing {pages_to_process} of {total_pages} pages for speed")
+            
+            # Process pages concurrently with limit
+            async def process_page(page_num):
+                try:
+                    image_bytes = await asyncio.to_thread(
+                        self._pdf_to_image_fast, 
+                        file_bytes, 
+                        page_num
+                    )
+                    enhanced_image = await asyncio.to_thread(
+                        self.image_processor.quick_enhance, 
+                        image_bytes
+                    )
+                    result = await asyncio.to_thread(
+                        self.ocr_processor.process_document_single_pass, 
+                        enhanced_image
+                    )
+                    return f"## Page {page_num + 1}\n\n{result}"
+                except Exception as e:
+                    return f"## Page {page_num + 1}\n\nError: {str(e)}"
+            
+            # Concurrent processing with semaphore
+            semaphore = asyncio.Semaphore(2)  # Max 2 pages at once
+            
+            async def process_page_with_semaphore(page_num):
+                async with semaphore:
+                    return await process_page(page_num)
+            
+            tasks = [
+                process_page_with_semaphore(i) 
+                for i in range(pages_to_process)
+            ]
+            
+            results = await asyncio.gather(*tasks)
+            
+            if pages_to_process < total_pages:
+                results.append(f"\n---\n**Note**: Only processed {pages_to_process} of {total_pages} pages for performance. Use full extraction if needed.")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Selective PDF extraction failed: {e}", exc_info=True)
+            return [f"Error: Selective extraction failed - {str(e)}"]
+
+# --- Dependency Injection with Connection Pooling ---
+_extractor_instance: Optional[FastDocumentExtractor] = None
 
 @asynccontextmanager
 async def lifespan(app):
-    """FastAPI lifespan context manager to initialize/cleanup the extractor."""
+    """Optimized application lifespan manager"""
     global _extractor_instance
-    async with _extractor_lock:
+    try:
         if _extractor_instance is None:
-            _extractor_instance = DocumentTextExtractor()
-            logger.info("DocumentTextExtractor singleton instance created via app lifespan.")
-        else:
-            logger.info("DocumentTextExtractor instance already existed when lifespan started.")
-    
-    yield
-    
-    logger.info("DocumentTextExtractor instance shutting down (if any cleanup actions were needed).")
+            _extractor_instance = FastDocumentExtractor()
+            logger.info("FastDocumentExtractor initialized")
+        
+        yield
+        
+    except Exception as e:
+        logger.error(f"Startup error: {e}")
+        raise
+    finally:
+        # Cleanup thread pools
+        if _extractor_instance and hasattr(_extractor_instance.ocr_processor, 'executor'):
+            _extractor_instance.ocr_processor.executor.shutdown(wait=True)
+        logger.info("FastDocumentExtractor shutdown complete")
 
-async def get_text_extractor() -> DocumentTextExtractor:
-    """Dependency injector to get the DocumentTextExtractor instance."""
-    global _extractor_instance
+async def get_text_extractor() -> FastDocumentExtractor:
+    """Fast dependency injection"""
     if _extractor_instance is None:
-        async with _extractor_lock:
-            if _extractor_instance is None:
-                logger.warning(
-                    "DocumentTextExtractor instance was None when requested. Creating new instance as fallback."
-                )
-                _extractor_instance = DocumentTextExtractor()
+        raise RuntimeError("FastDocumentExtractor not initialized")
     return _extractor_instance
 
-# --- Backward compatible function (if used by older modules directly) ---
+# --- Optimized Public API ---
 async def extract_text_from_file(file_base64_data: str, file_extension: str) -> str:
-    """
-    Wrapper to use the DocumentTextExtractor instance.
-    This is what was originally imported and used.
-    """
+    """High-speed single document extraction"""
     extractor = await get_text_extractor()
-    return await extractor.extract_text_from_file_data(file_base64_data, file_extension)
+    return await extractor.extract_text_fast(file_base64_data, file_extension)
+
+async def extract_text_from_pdf_limited(file_base64_data: str, max_pages: int = 5) -> List[str]:
+    """Fast PDF extraction with page limits"""
+    extractor = await get_text_extractor()
+    return await extractor.extract_pdf_pages_selective(file_base64_data, max_pages)
+
+async def extract_text_batch_processing(file_data_list: List[Tuple[str, str]]) -> List[str]:
+    """Batch processing for multiple files"""
+    extractor = await get_text_extractor()
+    return await extractor.extract_text_batch(file_data_list)
+
+# --- Performance Monitoring ---
+class PerformanceMonitor:
+    """Simple performance monitoring for optimization"""
+    
+    def __init__(self):
+        self.metrics = {}
+    
+    def record_timing(self, operation: str, duration: float):
+        if operation not in self.metrics:
+            self.metrics[operation] = []
+        self.metrics[operation].append(duration)
+    
+    def get_average_time(self, operation: str) -> float:
+        if operation not in self.metrics:
+            return 0.0
+        return sum(self.metrics[operation]) / len(self.metrics[operation])
+    
+    def get_performance_report(self) -> Dict[str, float]:
+        return {
+            operation: self.get_average_time(operation) 
+            for operation in self.metrics
+        }
+
+# Global performance monitor
+performance_monitor = PerformanceMonitor()

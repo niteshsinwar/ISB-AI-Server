@@ -41,15 +41,22 @@ async def health_check_endpoint(
 
     # Check 1: Gemini/Text Extractor
     try:
+        # The dependency function `get_text_extractor` will raise an exception if
+        # the extractor isn't initialized, which is caught below.
         extractor = await get_text_extractor()
-        if extractor and extractor.gemini_model:
-            checks.append(DependencyStatus(name="Gemini API", status="ok", details="Model initialized."))
-        else:
-            overall_status = "degraded"
-            checks.append(DependencyStatus(name="Gemini API", status="unavailable", details="Model not initialized. Check GOOGLE_API_KEY."))
+        
+        # If we get here, the extractor is initialized. We can provide more detail.
+        model_name = "unknown"
+        if hasattr(extractor, 'ocr_processor') and hasattr(extractor.ocr_processor, 'llm'):
+            model_name = extractor.ocr_processor.llm.model
+            
+        checks.append(DependencyStatus(name="Gemini API", status="ok", details=f"Extractor ready. Using model: {model_name}"))
+
     except Exception as e:
+        # This catches any failure during extractor initialization.
         overall_status = "degraded"
-        checks.append(DependencyStatus(name="Gemini API", status="unavailable", details=f"Error: {str(e)}"))
+        logger.error(f"Gemini API health check failed: {e}", exc_info=True)
+        checks.append(DependencyStatus(name="Gemini API", status="unavailable", details=f"Initialization Error: {str(e)}"))
 
     # Check 2: Salesforce
     try:
