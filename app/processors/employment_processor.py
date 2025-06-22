@@ -11,7 +11,8 @@ from app.config import (
 
 if TYPE_CHECKING:
     from app.services.salesforce_service import SalesforceService
-    from app.services.document_extraction_service import extract_text_from_file
+    # Updated for explicit function imports
+    from app.services.document_extraction_service import extract_text_from_file, extract_text_from_pdf_limited
     from app.crew.employment_crew import EmploymentVerificationCrewOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ async def process_single_employment_detail(
     record_sobject_api_name_key_for_apex = EMPLOYMENT_LOG_OBJECT_API_NAME
     logger.info(f"Starting Employment History processing for Log ID: {employment_log_id} (App: {parent_application_id})")
 
-    from app.services.document_extraction_service import extract_text_from_file
+    from app.services.document_extraction_service import extract_text_from_file, extract_text_from_pdf_limited
     from app.crew.employment_crew import EmploymentVerificationCrewOrchestrator
 
     # 1. Fetch data from Salesforce
@@ -65,17 +66,21 @@ async def process_single_employment_detail(
     if not base64_data or not file_extension:
         raise ValueError("Document data (base64) or file extension missing in payload.")
         
-    document_text: str | List[str] = await extract_text_from_file(base64_data, file_extension)
-    
-    # FIX: Handle cases where the extractor returns a list of strings
-    if isinstance(document_text, list):
-        document_text = "\n\n--- Page Break ---\n\n".join(document_text)
+    # --- MODIFIED: Intelligent Document Extraction ---
+    document_text_string: str
+    if file_extension.lower() == 'pdf':
+        logger.info(f"PDF document detected. Using multi-page extraction for '{file_name}'.")
+        pages_text_list: List[str] = await extract_text_from_pdf_limited(base64_data)
+        document_text_string = "\n\n--- Page Break ---\n\n".join(pages_text_list)
+    else:
+        logger.info(f"Image document detected. Using single-page extraction for '{file_name}'.")
+        document_text_string = await extract_text_from_file(base64_data, file_extension)
 
-    if document_text.startswith("Error:") or "No text found" in document_text:
-        raise ValueError(f"Text extraction failed for '{file_name}': {document_text}")
+    if document_text_string.startswith("Error:") or "No text found" in document_text_string:
+        raise ValueError(f"Text extraction failed for '{file_name}': {document_text_string}")
 
     # 3. Run the verification crew
-    emp_crew = EmploymentVerificationCrewOrchestrator(record_data, document_text)
+    emp_crew = EmploymentVerificationCrewOrchestrator(record_data, document_text_string)
     report_dict = await asyncio.to_thread(emp_crew.run)
 
     field_summary_report = report_dict.get('field_comparison_summary')

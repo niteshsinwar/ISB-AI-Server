@@ -13,6 +13,16 @@ from app.config import (
 from app.crew.crew_utils import (
     initialize_llm, clean_and_extract_json, log_error, CrewErrorHandler
 )
+from app.crew.crew_prompts import (
+    APPLICATION_DATA_COMPARATOR_AGENT_GOAL,
+    APPLICATION_DATA_COMPARATOR_AGENT_BACKSTORY,
+    APPLICATION_DATA_COMPARISON_TASK_DESCRIPTION,
+    APPLICATION_DATA_COMPARISON_EXPECTED_OUTPUT,
+    FINAL_REPORT_GENERATOR_AGENT_GOAL,
+    FINAL_REPORT_GENERATOR_AGENT_BACKSTORY,
+    FINAL_REPORT_GENERATION_TASK_DESCRIPTION,
+    FINAL_REPORT_GENERATION_EXPECTED_OUTPUT 
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,15 +49,8 @@ class ApplicationVerificationAgents:
     def data_comparator_agent(self):
         return Agent(
             role='Data Comparator',
-            goal="""
-            Compare the extracted text from a user-provided document against a set of key-value pairs from a Salesforce record.
-            Your analysis must be precise, noting every match, partial match, or mismatch.
-            """,
-            backstory="""
-            You are a meticulous verification agent specializing in cross-referencing information.
-            Your core function is to ensure data integrity by comparing official documents against system records.
-            You are trusted for your accuracy and attention to detail.
-            """,
+            goal=APPLICATION_DATA_COMPARATOR_AGENT_GOAL,
+            backstory=APPLICATION_DATA_COMPARATOR_AGENT_BACKSTORY,
             llm=llm_comparator,
             verbose=True,
             allow_delegation=False,
@@ -57,15 +60,8 @@ class ApplicationVerificationAgents:
     def final_report_generator_agent(self):
         return Agent(
             role='Final Report Generator',
-            goal="""
-            Synthesize the comparison analysis into a final, structured JSON object.
-            This object must contain three specific keys: 'field_comparison_summary' (an HTML table), 'overall_feedback' (a concise text summary), and 'confidence_range' (a 0-100 integer).
-            """,
-            backstory="""
-            You are a report synthesizer responsible for creating clean, machine-readable outputs.
-            You take detailed analysis and transform it into a standardized JSON format suitable for system integration.
-            Your output must always conform to the required schema.
-            """,
+            goal=FINAL_REPORT_GENERATOR_AGENT_GOAL,
+            backstory=FINAL_REPORT_GENERATOR_AGENT_BACKSTORY,
             llm=llm_reporter,
             verbose=True,
             allow_delegation=False,
@@ -75,52 +71,20 @@ class ApplicationVerificationAgents:
 class ApplicationVerificationTasks:
     def compare_data_task(self, agent: Agent, document_text: str, record_data: Dict[str, Any], verifiable_fields: List[str]):
         return Task(
-            description=f"""
-            Analyze the provided `DOCUMENT_TEXT` and compare it against the `SALESFORCE_RECORD_DATA`.
-            Focus *only* on the following fields from the Salesforce data: {verifiable_fields}.
-
-            For each field, determine if the value from Salesforce is 'Matched', 'Partially Matched', 'Not Matched - Different Format', or 'Not Found in Document'.
-            Provide a clear 'Note' explaining your reasoning for each comparison, especially for partial matches or mismatches.
-            Format your entire analysis as a single, comprehensive string.
-
-            ---
-            DOCUMENT_TEXT:
-            {document_text}
-            ---
-            SALESFORCE_RECORD_DATA:
-            {record_data}
-            ---
-            """,
+            description=APPLICATION_DATA_COMPARISON_TASK_DESCRIPTION.format(
+                verifiable_fields=verifiable_fields,
+                document_text=document_text,
+                record_data=record_data
+            ),
             agent=agent,
-            expected_output="""
-            A single string containing a detailed, field-by-field comparison analysis.
-            Example for one field: "Full Name: The name 'John Doe' in Salesforce matches the name 'John Doe' in the document. Confidence: Matched. Note: Perfect match found."
-            """
+            expected_output=APPLICATION_DATA_COMPARISON_EXPECTED_OUTPUT
         )
 
     def generate_final_report_task(self, agent: Agent, context: str):
         return Task(
-            description=f"""
-            Based on the provided comparison analysis, generate a final JSON object with three keys:
-            1. 'field_comparison_summary': An HTML table string summarizing the field-by-field analysis. The table must have columns: 'Field Name', 'Record Value', 'Document Value', 'Confidence', and 'Note'.
-            2. 'overall_feedback': A concise, one-sentence text summary of the overall findings.
-            3. 'confidence_range': An integer between 0 and 100 representing the overall confidence in the match. Base this on the number of matched vs. mismatched fields.
-
-            ---
-            COMPARISON_ANALYSIS:
-            {context}
-            ---
-            """,
+            description=FINAL_REPORT_GENERATION_TASK_DESCRIPTION.format(context=context),
             agent=agent,
-            expected_output="""
-            A single, clean, and valid JSON object adhering to the specified structure. Do not include any markdown formatting like ```json.
-            Example:
-            {
-              "field_comparison_summary": "<div...><table...>...</table></div>",
-              "overall_feedback": "While core details match, discrepancies were found in the start and end dates.",
-              "confidence_range": 75
-            }
-            """
+            expected_output=FINAL_REPORT_GENERATION_EXPECTED_OUTPUT 
         )
 
 class ApplicationVerificationCrewOrchestrator:

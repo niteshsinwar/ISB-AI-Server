@@ -40,7 +40,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-app.include_router(main_api_router, prefix="/api/v1")
+app.include_router(main_api_router)
 
 logger.info(f"{APP_TITLE} - Version {APP_VERSION} initialized.")
 logger.info(f"Log level set to: {os.getenv('LOG_LEVEL', 'INFO').upper()}")

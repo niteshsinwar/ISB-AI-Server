@@ -1,7 +1,6 @@
-# project_root/app/config.py
 import os
 from dotenv import load_dotenv
-from typing import List, Dict
+from typing import List, Dict, Any
 
 # Load environment variables from .env file
 load_dotenv()
@@ -9,19 +8,34 @@ load_dotenv()
 # --- Application Metadata ---
 APP_TITLE: str = "Salesforce Document Text Extraction and Application Analysis API"
 APP_DESCRIPTION: str = "API for extracting information from document text and analyzing Salesforce application records."
-APP_VERSION: str = "1.0.0"
+APP_VERSION: str = "1.3.0" # Version updated to reflect pre-filtering logic
 
 # --- Logging Configuration ---
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # --- Salesforce Configuration ---
-SALESFORCE_DOMAIN: str | None = os.getenv("SALESFORCE_DOMAIN", "test")
-SALESFORCE_INSTANCE_URL: str | None = os.getenv("SALESFORCE_INSTANCE_URL")
-SALESFORCE_CLIENT_ID: str | None = os.getenv("SALESFORCE_CLIENT_ID")
-SALESFORCE_CLIENT_SECRET: str | None = os.getenv("SALESFORCE_CLIENT_SECRET")
-SALESFORCE_TOKEN_URL: str | None = os.getenv("SALESFORCE_TOKEN_URL")
+SALESFORCE_ORGS: Dict[str, Dict[str, Any]] = {
+    "dev": {
+        "client_id": os.getenv("DEV_SALESFORCE_CLIENT_ID"),
+        "client_secret": os.getenv("DEV_SALESFORCE_CLIENT_SECRET"),
+        "token_url": os.getenv("DEV_SALESFORCE_TOKEN_URL"),
+    },
+    "uat": {
+        "client_id": os.getenv("UAT_SALESFORCE_CLIENT_ID"),
+        "client_secret": os.getenv("UAT_SALESFORCE_CLIENT_SECRET"),
+        "token_url": os.getenv("UAT_SALESFORCE_TOKEN_URL"),
+    }
+}
 
 # --- Salesforce Object and Field API Names ---
+AI_SERVER_JOB_OBJECT_API_NAME: str = os.getenv("AI_SERVER_JOB_OBJECT_API_NAME", "AI_Server_Job__c")
+AIJ_APPLICATION_LOOKUP_FIELD: str = os.getenv("AIJ_APPLICATION_LOOKUP_FIELD", "Application__c")
+AIJ_JOB_ID_FIELD: str = os.getenv("AIJ_JOB_ID_FIELD", "Job_ID__c")
+AIJ_STATUS_FIELD: str = os.getenv("AIJ_STATUS_FIELD", "Status__c")
+AIJ_MESSAGE_FIELD: str = os.getenv("AIJ_MESSAGE_FIELD", "Message__c")
+AIJ_PROGRESS_FIELD: str = os.getenv("AIJ_PROGRESS_FIELD", "Progress_Details__c")
+AIJ_CLIENT_FP_FIELD: str = os.getenv("AIJ_CLIENT_FP_FIELD", "Client_Fingerprint__c")
+
 APPLICATION_VERIFICATION_SUMMARY_OBJECT_API_NAME: str = "Application_Verification_Summary__c"
 AVS_APPLICATION_LOOKUP_FIELD: str = "Application__c"
 AVS_CONTACT_LOOKUP_FIELD: str = "Contact__c"
@@ -54,83 +68,80 @@ APEX_ENDPOINT_PATHS: Dict[str, str] = {
 
 # --- Google Gemini Configuration ---
 GOOGLE_API_KEY: str | None = os.getenv("GOOGLE_API_KEY")
-
-# --- Model for general purpose text extraction (OCR) ---
-MODEL_TEXT_EXTRACTION: str = os.getenv("MODEL_TEXT_EXTRACTION", "gemini-2.5-pro-preview-06-05")
-MODEL_DATA_ANALYSIS: str = os.getenv("MODEL_DATA_ANALYSIS", "gemini-2.5-pro-preview-06-05") # Using a powerful model for analysis
-# --- Tiered Model Configuration for Crews ---
-# Tier 1: For the most complex reasoning (e.g., Marksheet Calculation)
-MODEL_COMPLEX_REASONING: str = os.getenv("MODEL_COMPLEX_REASONING", "gemini-2.5-pro-preview-06-05")
-TEMP_COMPLEX_REASONING: float = float(os.getenv("TEMP_COMPLEX_REASONING", "0.2"))
-
-# Tier 2: For standard verification tasks (ID, Employment, Test Scores)
-MODEL_STANDARD_VERIFICATION: str = os.getenv("MODEL_STANDARD_VERIFICATION", "gemini-2.5-pro-preview-06-05")
-TEMP_STANDARD_VERIFICATION: float = float(os.getenv("TEMP_STANDARD_VERIFICATION", "0.25"))
-
-# Tier 3: For final report generation and synthesis
-MODEL_HTML_SYNTHESIS: str = os.getenv("MODEL_HTML_SYNTHESIS", "gemini-2.5-pro-preview-06-05")
-TEMP_HTML_SYNTHESIS: float = float(os.getenv("TEMP_HTML_SYNTHESIS", "0.4"))
-
+MODEL_DATA_ANALYSIS: str = os.getenv("MODEL_DATA_ANALYSIS")
+MODEL_COMPLEX_REASONING: str = os.getenv("MODEL_COMPLEX_REASONING")
+TEMP_COMPLEX_REASONING: float = float(os.getenv("TEMP_COMPLEX_REASONING"))
+MODEL_TEXT_EXTRACTION: str = os.getenv("MODEL_TEXT_EXTRACTION")
+MODEL_STANDARD_VERIFICATION: str = os.getenv("MODEL_STANDARD_VERIFICATION")
+MODEL_HTML_SYNTHESIS: str = os.getenv("MODEL_HTML_SYNTHESIS")
+TEMP_STANDARD_VERIFICATION: float = float(os.getenv("TEMP_STANDARD_VERIFICATION"))
+TEMP_HTML_SYNTHESIS: float = float(os.getenv("TEMP_HTML_SYNTHESIS"))
 
 # --- AI Crew Configuration ---
-CONFIDENCE_PICKLIST_RANGES: List[str] = [
-    '100',
-    '90 to 99',
-    '80 to 90',
-    '40 to 80',
-    '0 to 40'
-]
+CONFIDENCE_PICKLIST_RANGES: List[str] = [ '100', '90 to 99', '80 to 90', '40 to 80', '0 to 40' ]
 
 # --- API Rate Limiting and Processing Configuration ---
-MAX_GLOBAL_REQUESTS_PER_WINDOW: int = int(os.getenv("MAX_GLOBAL_REQUESTS_PER_WINDOW", "30"))
-GLOBAL_RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("GLOBAL_RATE_LIMIT_WINDOW_SECONDS", "60"))
-MAX_CLIENT_REQUESTS_PER_WINDOW: int = int(os.getenv("MAX_CLIENT_REQUESTS_PER_WINDOW", "10"))
-CLIENT_RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("CLIENT_RATE_LIMIT_WINDOW_SECONDS", "60"))
-MIN_SECONDS_BETWEEN_SAME_APP_REQUESTS: int = int(os.getenv("MIN_SECONDS_BETWEEN_SAME_APP_REQUESTS", "5"))
-SUSPICIOUS_THRESHOLD_REQUESTS: int = int(os.getenv("SUSPICIOUS_THRESHOLD_REQUESTS", "35"))
-SUSPICIOUS_WINDOW_SECONDS: int = int(os.getenv("SUSPICIOUS_WINDOW_SECONDS", "60"))
+MAX_CONCURRENT_PROCESSING_SLOTS: int = int(os.getenv("MAX_CONCURRENT_PROCESSING_SLOTS", "12"))
+ACTIVE_PROCESSING_TIMEOUT_SECONDS: int = int(os.getenv("ACTIVE_PROCESSING_TIMEOUT_SECONDS", "360"))
+MAX_CLIENT_REQUESTS_PER_WINDOW: int = int(os.getenv("MAX_CLIENT_REQUESTS_PER_WINDOW", "15"))
+SUSPICIOUS_THRESHOLD_REQUESTS: int = int(os.getenv("SUSPICIOUS_THRESHOLD_REQUESTS", "25"))
+MAX_GLOBAL_REQUESTS_PER_WINDOW: int = int(os.getenv("MAX_GLOBAL_REQUESTS_PER_WINDOW", "40"))
 SUSPICIOUS_BLOCK_DURATION_SECONDS: int = int(os.getenv("SUSPICIOUS_BLOCK_DURATION_SECONDS", "300"))
-MAX_CONCURRENT_PROCESSING_SLOTS: int = int(os.getenv("MAX_CONCURRENT_PROCESSING_SLOTS", "10"))
+GLOBAL_RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("GLOBAL_RATE_LIMIT_WINDOW_SECONDS", "60"))
+CLIENT_RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("CLIENT_RATE_LIMIT_WINDOW_SECONDS", "60"))
+SUSPICIOUS_WINDOW_SECONDS: int = int(os.getenv("SUSPICIOUS_WINDOW_SECONDS", "60"))
+MIN_SECONDS_BETWEEN_SAME_APP_REQUESTS: int = int(os.getenv("MIN_SECONDS_BETWEEN_SAME_APP_REQUESTS", "5"))
 RECENTLY_PROCESSED_TTL_SECONDS: int = int(os.getenv("RECENTLY_PROCESSED_TTL_SECONDS", "300"))
-ACTIVE_PROCESSING_TIMEOUT_SECONDS: int = int(os.getenv("ACTIVE_PROCESSING_TIMEOUT_SECONDS", "900"))
-
 
 # --- Endpoint Configuration ---
+# CRITICAL MODIFICATION: Added 'filtering_criteria' to selectively process only supported record subtypes.
+# This aligns the Python server with the business logic in the Apex handlers.
 RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
     {
         "target_record_type": EDUCATION_LOG_OBJECT_API_NAME,
         "retrieval_method": "direct",
         "lookup_on_child_to_parent": EDUCATION_LOG_FIELD_TO_PARENT_APP,
         "processor_module": "app.processors.education_processor",
-        "processor_function_name": "process_single_education_history_detail"
+        "processor_function_name": "process_single_education_history_detail",
+        "filtering_criteria": {
+            "field_api_name": "Education_History__r.Degree_Level__c",
+            "allowed_values": [
+                'XII', 'Bachelors', 'Master', 'Integrated',
+                'Professional Education', 'Doctorate'
+            ]
+        }
     },
     {
         "target_record_type": EMPLOYMENT_LOG_OBJECT_API_NAME,
         "retrieval_method": "direct",
         "lookup_on_child_to_parent": EMPLOYMENT_LOG_FIELD_TO_PARENT_APP,
         "processor_module": "app.processors.employment_processor",
-        "processor_function_name": "process_single_employment_detail"
+        "processor_function_name": "process_single_employment_detail",
+        # NEW: Sorting and limiting rules to get only the latest record.
+        # The relationship name 'Affiliation__r' is used to access the start date
+        # on the related hed__Affiliation__c object for sorting.
+        "order_by": "Affiliation__r.hed__StartDate__c DESC NULLS LAST",
+        "limit": 1
     },
     {
         "target_record_type": TEST_SCORE_OBJECT_API_NAME,
         "retrieval_method": "direct",
         "lookup_on_child_to_parent": TEST_SCORE_LOOKUP_TO_PARENT_APP,
         "processor_module": "app.processors.test_score_processor",
-        "processor_function_name": "process_single_test_score_detail"
+        "processor_function_name": "process_single_test_score_detail",
+        "filtering_criteria": {
+            "field_api_name": "RecordTypeName__c",
+            "allowed_values": ["GMAT_FOCUS", "GMAT", "GRE"]
+        }
     }
 ]
 
-# Maximum length for the analysis report stored in Salesforce
 # --- Text Extraction Prompts ---
 MAX_SALESFORCE_REPORT_LENGTH: int = 131072
 MAX_CONCURRENT_OCR_PAGES: int = int(os.getenv("MAX_CONCURRENT_OCR_PAGES", "7"))
-
-# Prompt for the first agent: Raw OCR
 RAW_OCR_PROMPT = """
 You are a high-precision Optical Character Recognition (OCR) engine. Your only task is to transcribe ALL text from the provided image, exactly as it appears. Maintain the original spatial layout as best as possible. Do not interpret, format, or analyze the content. Output only the raw, transcribed text.
 """
-
-# Prompt for the second agent: Data Structuring and Analysis
 DATA_STRUCTURING_PROMPT = """
 You are an expert data analyst and document structurer. You will receive raw, messy text transcribed from a document, along with the original document image for visual context. Your task is to analyze both and create a perfect, structured Markdown representation of the document.
 

@@ -7,11 +7,21 @@ from crewai import Agent, Task, Crew, Process
 from pydantic import BaseModel, Field, constr
 from app.config import (
     GOOGLE_API_KEY, CONFIDENCE_PICKLIST_RANGES,
-    MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION,
+    MODEL_COMPLEX_REASONING, TEMP_COMPLEX_REASONING,
     MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS
 )
 from app.crew.crew_utils import (
     initialize_llm, clean_and_extract_json, log_error, CrewErrorHandler
+)
+from app.crew.crew_prompts import (
+    EDUCATION_DATA_COMPARATOR_AGENT_GOAL,
+    EDUCATION_DATA_COMPARATOR_AGENT_BACKSTORY,
+    FINAL_REPORT_GENERATOR_AGENT_GOAL,
+    FINAL_REPORT_GENERATOR_AGENT_BACKSTORY,
+    EDUCATION_DATA_COMPARISON_TASK_DESCRIPTION,
+    EDUCATION_DATA_COMPARISON_EXPECTED_OUTPUT,
+    FINAL_REPORT_GENERATION_TASK_DESCRIPTION,
+    FINAL_REPORT_GENERATION_EXPECTED_OUTPUT
 )
 
 logger = logging.getLogger(__name__)
@@ -28,7 +38,7 @@ FIELDS_TO_EXCLUDE_FROM_PROCESSING: List[str] = [
 ]
 
 # LLM Initialization
-llm_comparator = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, GOOGLE_API_KEY)
+llm_comparator = initialize_llm(MODEL_COMPLEX_REASONING, TEMP_COMPLEX_REASONING, GOOGLE_API_KEY)
 llm_reporter = initialize_llm(MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS, GOOGLE_API_KEY)
 
 if llm_comparator and llm_reporter:
@@ -40,68 +50,42 @@ class EducationVerificationAgents:
     def data_comparator_agent(self):
         return Agent(
             role='Data Comparator',
-            goal="Compare extracted text from an educational document against Salesforce record data.",
-            backstory="A meticulous agent focused on verifying educational credentials with high accuracy.",
-            llm=llm_comparator, verbose=True, allow_delegation=False, max_iter=5
+            goal=EDUCATION_DATA_COMPARATOR_AGENT_GOAL,
+            backstory=EDUCATION_DATA_COMPARATOR_AGENT_BACKSTORY,
+            llm=llm_comparator, 
+            verbose=True, 
+            allow_delegation=False, 
+            max_iter=5
         )
 
     def final_report_generator_agent(self):
         return Agent(
             role='Final Report Generator',
-            goal="Synthesize the comparison analysis into a structured JSON object.",
-            backstory="A reporting specialist who creates clean, standardized JSON outputs for system integration.",
-            llm=llm_reporter, verbose=True, allow_delegation=False, max_iter=3
+            goal=FINAL_REPORT_GENERATOR_AGENT_GOAL,
+            backstory=FINAL_REPORT_GENERATOR_AGENT_BACKSTORY,
+            llm=llm_reporter, 
+            verbose=True, 
+            allow_delegation=False, 
+            max_iter=3
         )
 
 class EducationVerificationTasks:
     def compare_data_task(self, agent: Agent, document_text: str, record_data: Dict[str, Any], verifiable_fields: List[str]):
         return Task(
-            description=f"""
-            Analyze the provided `DOCUMENT_TEXT` and compare it against the `SALESFORCE_RECORD_DATA`.
-            Focus *only* on the following fields from the Salesforce data: {verifiable_fields}.
-
-            For each field, determine if the value from Salesforce is 'Matched', 'Partially Matched', 'Not Matched - Different Format', or 'Not Found in Document'.
-            Provide a clear 'Note' explaining your reasoning for each comparison, especially for partial matches or mismatches.
-            Format your entire analysis as a single, comprehensive string.
-
-            ---
-            DOCUMENT_TEXT:
-            {document_text}
-            ---
-            SALESFORCE_RECORD_DATA:
-            {record_data}
-            ---
-            """,
+            description=EDUCATION_DATA_COMPARISON_TASK_DESCRIPTION.format(
+                verifiable_fields=verifiable_fields,
+                document_text=document_text,
+                record_data=record_data
+            ),
             agent=agent,
-            expected_output="""
-            A single string containing a detailed, field-by-field comparison analysis.
-            Example for one field: "Full Name: The name 'John Doe' in Salesforce matches the name 'John Doe' in the document. Confidence: Matched. Note: Perfect match found."
-            """
+            expected_output=EDUCATION_DATA_COMPARISON_EXPECTED_OUTPUT
         )
 
     def generate_final_report_task(self, agent: Agent, context: str):
         return Task(
-            description=f"""
-            Based on the provided comparison analysis, generate a final JSON object with three keys:
-            1. 'field_comparison_summary': An HTML table string summarizing the field-by-field analysis. The table must have columns: 'Field Name', 'Record Value', 'Document Value', 'Confidence', and 'Note'.
-            2. 'overall_feedback': A concise, one-sentence text summary of the overall findings.
-            3. 'confidence_range': An integer between 0 and 100 representing the overall confidence in the match. Base this on the number of matched vs. mismatched fields.
-
-            ---
-            COMPARISON_ANALYSIS:
-            {context}
-            ---
-            """,
+            description=FINAL_REPORT_GENERATION_TASK_DESCRIPTION.format(context=context),
             agent=agent,
-            expected_output="""
-            A single, clean, and valid JSON object adhering to the specified structure. Do not include any markdown formatting like ```json.
-            Example:
-            {
-              "field_comparison_summary": "<div...><table...>...</table></div>",
-              "overall_feedback": "While core details match, discrepancies were found in the start and end dates.",
-              "confidence_range": 75
-            }
-            """
+            expected_output=FINAL_REPORT_GENERATION_EXPECTED_OUTPUT
         )
 
 class EducationVerificationCrewOrchestrator:
