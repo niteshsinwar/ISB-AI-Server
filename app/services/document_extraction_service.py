@@ -21,31 +21,33 @@ from app.config import (
     RAW_OCR_PROMPT, DATA_STRUCTURING_PROMPT
 )
 
+Image.MAX_IMAGE_PIXELS = None
+
 logger = logging.getLogger(__name__)
 
-# --- Optimized Single-Pass OCR Implementation ---
+# --- NEW: Custom Exception for clear error propagation ---
+class DocumentExtractionError(Exception):
+    """Custom exception for errors during the document extraction process."""
+    pass
 
+# --- Optimized Single-Pass OCR Implementation ---
 class OptimizedGeminiProcessor:
     """Optimized single-pass Gemini processor for faster OCR"""
     
     def __init__(self):
-        # Use faster model for OCR if available
         self.llm = ChatGoogleGenerativeAI(
-            model=MODEL_TEXT_EXTRACTION,  # Consider using gemini-1.5-flash for speed
+            model=MODEL_TEXT_EXTRACTION,
             google_api_key=GOOGLE_API_KEY,
             temperature=0.1,
-            # Add timeout and retry configurations
             request_timeout=30.0,
             max_retries=2
         )
-        
-        # Thread pool for CPU-intensive operations
         self.executor = ThreadPoolExecutor(max_workers=4)
     
-    def process_document_single_pass(self, image_bytes: bytes) -> str:
+    # MODIFIED: Accepts a context dictionary for improved logging
+    def process_document_single_pass(self, image_bytes: bytes, context: dict) -> str:
         """Single-pass OCR with built-in structuring to reduce API calls"""
         try:
-            # Combined prompt for OCR + structuring in one go
             combined_prompt = f"""
             {RAW_OCR_PROMPT}
             
@@ -55,9 +57,8 @@ class OptimizedGeminiProcessor:
             Please provide the final structured Markdown output directly, not the raw OCR text.
             """
             
-            # Encode image to base64
             encoded_image = base64.b64encode(image_bytes).decode('utf-8')
-            image_url_content = f"data:image/png;base64,{encoded_image}"
+            image_url_content = f"data:image/jpeg;base64,{encoded_image}"
 
             messages = [
                 HumanMessage(
@@ -72,46 +73,39 @@ class OptimizedGeminiProcessor:
             response = self.llm.invoke(messages)
             processing_time = time.time() - start_time
             
-            logger.info(f"Single-pass OCR completed in {processing_time:.2f} seconds")
+            logger.info(f"Context: {context} - Single-pass OCR completed in {processing_time:.2f} seconds.")
             return response.content
             
         except Exception as e:
-            logger.error(f"Error in optimized OCR: {e}", exc_info=True)
-            return f"OCR Error: {str(e)}"
+            # MODIFIED: Now raises the custom exception
+            logger.error(f"Context: {context} - Error in optimized OCR: {e}", exc_info=True)
+            raise DocumentExtractionError(f"AI model failed during OCR processing: {e}")
 
 # --- Streamlined Image Processing ---
 class FastImageProcessor:
     """Lightweight image processing focused on speed"""
     
+    MAX_DIMENSION = 4096
+
     @staticmethod
-    def quick_enhance(image_bytes: bytes) -> bytes:
+    # MODIFIED: Accepts a context dictionary for improved logging
+    def quick_enhance(image_bytes: bytes, context: dict) -> bytes:
         """Quick image enhancement focused on OCR performance vs quality trade-off"""
         try:
             img = Image.open(io.BytesIO(image_bytes))
             
-            # Skip enhancement for already good quality images
-            width, height = img.size
-            if width >= 1200 and height >= 1200:
-                # Image is already high quality, return as-is
-                return image_bytes
+            if img.width > FastImageProcessor.MAX_DIMENSION or img.height > FastImageProcessor.MAX_DIMENSION:
+                img.thumbnail((FastImageProcessor.MAX_DIMENSION, FastImageProcessor.MAX_DIMENSION), Image.Resampling.LANCZOS)
             
-            # Minimal processing for speed
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Only resize if image is very small
-            if width < 800 or height < 800:
-                scale_factor = max(800 / width, 800 / height)
-                new_size = (int(width * scale_factor), int(height * scale_factor))
-                img = img.resize(new_size, Image.Resampling.LANCZOS)
-            
-            # Save with optimized settings
             buffer = io.BytesIO()
-            img.save(buffer, format='JPEG', quality=85, optimize=True)
+            img.save(buffer, format='JPEG', quality=90, optimize=True)
             return buffer.getvalue()
             
         except Exception as e:
-            logger.warning(f"Quick enhancement failed, using original: {e}")
+            logger.warning(f"Context: {context} - Quick enhancement failed, using original image: {e}")
             return image_bytes
 
 # --- Optimized Main Service Class ---
@@ -120,171 +114,97 @@ class FastDocumentExtractor:
         self.image_processor = FastImageProcessor()
         self.ocr_processor = OptimizedGeminiProcessor()
 
-    def _decode_base64(self, b64_data: str) -> Tuple[bool, bytes, str]:
-        """Fast base64 decoding with minimal validation"""
+    # MODIFIED: Raises an exception on failure instead of returning a tuple
+    def _decode_base64(self, b64_data: str) -> bytes:
+        """Fast base64 decoding that raises an exception on failure."""
         try:
             if ',' in b64_data:
                 b64_data = b64_data.split(',', 1)[1]
-            return True, base64.b64decode(b64_data, validate=True), ""
+            return base64.b64decode(b64_data, validate=True)
         except Exception as e:
-            return False, b'', f"Invalid base64: {str(e)}"
+            raise DocumentExtractionError(f"Invalid Base64 input: {e}")
 
     def _pdf_to_image_fast(self, pdf_bytes: bytes, page_num: int = 0) -> bytes:
         """Fast PDF to image conversion for single page"""
         try:
-            # Lower DPI for speed vs quality trade-off
             images = convert_from_bytes(
                 pdf_bytes, 
-                dpi=200,  # Reduced from 300 for speed
-                fmt='jpeg',  # JPEG is faster than PNG
+                dpi=200,
+                fmt='jpeg',
                 first_page=page_num + 1,
-                last_page=page_num + 1,  # Only convert needed page
-                thread_count=1,  # Reduce threading overhead for single page
+                last_page=page_num + 1,
+                thread_count=1,
                 poppler_path=None
             )
             
             if not images:
-                raise ValueError("No images extracted from PDF")
+                raise ValueError("No image extracted from PDF page.")
             
             with io.BytesIO() as buf:
                 images[0].save(buf, format='JPEG', quality=85, optimize=True)
                 return buf.getvalue()
             
         except Exception as e:
-            logger.error(f"Fast PDF conversion failed: {e}")
-            raise e
-    
-    async def extract_text_fast(self, file_base64_data: str, file_extension: str) -> str:
-        """Optimized extraction method prioritizing speed"""
-        
+            logger.error(f"Fast PDF conversion failed for page {page_num+1}: {e}")
+            raise  # Re-raise the original exception
+
+    # RENAMED: 'extract_text_fast' -> 'extract_text_from_document' for clarity
+    # MODIFIED: Added 'context_log_id' for traceable logging
+    async def extract_text_from_document(self, file_base64_data: str, file_extension: str, context_log_id: str) -> str:
+        """
+        Optimized extraction method that raises exceptions on failure.
+        """
         start_time = time.time()
-        
-        # Fast decode
-        success, file_bytes, error = self._decode_base64(file_base64_data)
-        if not success:
-            return f"Error: {error}"
+        log_context = {"file_ext": file_extension, "id": context_log_id}
 
         try:
-            # Process different file types with speed optimizations
+            file_bytes = self._decode_base64(file_base64_data)
+
             if file_extension.lower() == 'pdf':
-                # Only process first page by default for speed
-                image_bytes = await asyncio.to_thread(
-                    self._pdf_to_image_fast, 
-                    file_bytes, 
-                    0  # First page only
-                )
+                reader = PdfReader(io.BytesIO(file_bytes))
+                num_pages = len(reader.pages)
+                logger.info(f"Context: {log_context} - PDF with {num_pages} pages detected.")
                 
+                all_pages_text = []
+                for page_num in range(num_pages):
+                    page_log_context = {**log_context, "page": f"{page_num + 1}/{num_pages}"}
+                    
+                    image_bytes = await asyncio.to_thread(
+                        self._pdf_to_image_fast, file_bytes, page_num
+                    )
+                    enhanced_bytes = await asyncio.to_thread(
+                        self.image_processor.quick_enhance, image_bytes, page_log_context
+                    )
+                    page_result = await asyncio.to_thread(
+                        self.ocr_processor.process_document_single_pass, enhanced_bytes, page_log_context
+                    )
+                    all_pages_text.append(f"## Page {page_num + 1}\n\n{page_result}")
+                
+                result = "\n\n---\n\n".join(all_pages_text)
+
             elif file_extension.lower() in {"png", "jpg", "jpeg", "webp", "bmp", "tiff"}:
-                image_bytes = file_bytes
-                
+                logger.info(f"Context: {log_context} - Single image detected.")
+                enhanced_bytes = await asyncio.to_thread(
+                    self.image_processor.quick_enhance, file_bytes, log_context
+                )
+                result = await asyncio.to_thread(
+                    self.ocr_processor.process_document_single_pass, enhanced_bytes, log_context
+                )
             else:
-                return f"Error: Unsupported file format '{file_extension}'"
+                raise DocumentExtractionError(f"Unsupported file format '{file_extension}'")
 
-            # Quick enhancement in thread pool
-            enhanced_image_bytes = await asyncio.to_thread(
-                self.image_processor.quick_enhance, 
-                image_bytes
-            )
-
-            # Single-pass OCR processing
-            result = await asyncio.to_thread(
-                self.ocr_processor.process_document_single_pass, 
-                enhanced_image_bytes
-            )
-            
             total_time = time.time() - start_time
-            logger.info(f"Total extraction completed in {total_time:.2f} seconds")
-            
+            logger.info(f"Context: {log_context} - Total extraction completed in {total_time:.2f} seconds.")
             return result
             
         except Exception as e:
-            logger.error(f"Fast extraction failed: {e}", exc_info=True)
-            return f"Error: Fast extraction failed - {str(e)}"
+            # MODIFIED: All errors are caught and re-raised as the custom exception
+            logger.error(f"Context: {log_context} - Document extraction failed: {e}", exc_info=True)
+            if isinstance(e, DocumentExtractionError):
+                raise  # Re-raise the already specific exception
+            raise DocumentExtractionError(f"An unexpected error occurred in extraction: {e}")
 
-    async def extract_text_batch(self, file_data_list: List[Tuple[str, str]]) -> List[str]:
-        """Batch processing for multiple files with concurrency"""
-        try:
-            # Process multiple files concurrently
-            tasks = [
-                self.extract_text_fast(file_data, extension) 
-                for file_data, extension in file_data_list
-            ]
-            
-            # Limit concurrency to avoid overwhelming the API
-            semaphore = asyncio.Semaphore(3)  # Max 3 concurrent operations
-            
-            async def process_with_semaphore(task):
-                async with semaphore:
-                    return await task
-            
-            results = await asyncio.gather(*[
-                process_with_semaphore(task) for task in tasks
-            ])
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"Batch processing failed: {e}", exc_info=True)
-            return [f"Error: Batch processing failed - {str(e)}"]
-
-    async def extract_pdf_pages_selective(self, file_base64_data: str, max_pages: int = 5) -> List[str]:
-        """Extract from PDF with page limit for speed"""
-        success, file_bytes, error = self._decode_base64(file_base64_data)
-        if not success:
-            return [f"Error: {error}"]
-
-        try:
-            # Quick page count check
-            reader = PdfReader(io.BytesIO(file_bytes))
-            total_pages = len(reader.pages)
-            pages_to_process = min(total_pages, max_pages)
-            
-            logger.info(f"Processing {pages_to_process} of {total_pages} pages for speed")
-            
-            # Process pages concurrently with limit
-            async def process_page(page_num):
-                try:
-                    image_bytes = await asyncio.to_thread(
-                        self._pdf_to_image_fast, 
-                        file_bytes, 
-                        page_num
-                    )
-                    enhanced_image = await asyncio.to_thread(
-                        self.image_processor.quick_enhance, 
-                        image_bytes
-                    )
-                    result = await asyncio.to_thread(
-                        self.ocr_processor.process_document_single_pass, 
-                        enhanced_image
-                    )
-                    return f"## Page {page_num + 1}\n\n{result}"
-                except Exception as e:
-                    return f"## Page {page_num + 1}\n\nError: {str(e)}"
-            
-            # Concurrent processing with semaphore
-            semaphore = asyncio.Semaphore(2)  # Max 2 pages at once
-            
-            async def process_page_with_semaphore(page_num):
-                async with semaphore:
-                    return await process_page(page_num)
-            
-            tasks = [
-                process_page_with_semaphore(i) 
-                for i in range(pages_to_process)
-            ]
-            
-            results = await asyncio.gather(*tasks)
-            
-            if pages_to_process < total_pages:
-                results.append(f"\n---\n**Note**: Only processed {pages_to_process} of {total_pages} pages for performance. Use full extraction if needed.")
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"Selective PDF extraction failed: {e}", exc_info=True)
-            return [f"Error: Selective extraction failed - {str(e)}"]
-
-# --- Dependency Injection with Connection Pooling ---
+# --- Dependency Injection (Unchanged) ---
 _extractor_instance: Optional[FastDocumentExtractor] = None
 
 @asynccontextmanager
@@ -294,63 +214,29 @@ async def lifespan(app):
     try:
         if _extractor_instance is None:
             _extractor_instance = FastDocumentExtractor()
-            logger.info("FastDocumentExtractor initialized")
-        
+            logger.info("FastDocumentExtractor initialized.")
         yield
-        
     except Exception as e:
-        logger.error(f"Startup error: {e}")
+        logger.critical(f"FastDocumentExtractor startup error: {e}", exc_info=True)
         raise
     finally:
-        # Cleanup thread pools
         if _extractor_instance and hasattr(_extractor_instance.ocr_processor, 'executor'):
             _extractor_instance.ocr_processor.executor.shutdown(wait=True)
-        logger.info("FastDocumentExtractor shutdown complete")
+        logger.info("FastDocumentExtractor shutdown complete.")
 
 async def get_text_extractor() -> FastDocumentExtractor:
     """Fast dependency injection"""
     if _extractor_instance is None:
-        raise RuntimeError("FastDocumentExtractor not initialized")
+        raise RuntimeError("FastDocumentExtractor is not initialized. The application may not have started correctly.")
     return _extractor_instance
 
-# --- Optimized Public API ---
-async def extract_text_from_file(file_base64_data: str, file_extension: str) -> str:
-    """High-speed single document extraction"""
+# --- Simplified Public API ---
+# MODIFIED: This function now passes a context ID for logging
+async def extract_text_from_file(file_base64_data: str, file_extension: str, record_id: str) -> str:
+    """
+    High-speed document extraction that propagates errors via exceptions.
+    A record_id is required for traceable logging.
+    """
     extractor = await get_text_extractor()
-    return await extractor.extract_text_fast(file_base64_data, file_extension)
-
-async def extract_text_from_pdf_limited(file_base64_data: str, max_pages: int = 5) -> List[str]:
-    """Fast PDF extraction with page limits"""
-    extractor = await get_text_extractor()
-    return await extractor.extract_pdf_pages_selective(file_base64_data, max_pages)
-
-async def extract_text_batch_processing(file_data_list: List[Tuple[str, str]]) -> List[str]:
-    """Batch processing for multiple files"""
-    extractor = await get_text_extractor()
-    return await extractor.extract_text_batch(file_data_list)
-
-# --- Performance Monitoring ---
-class PerformanceMonitor:
-    """Simple performance monitoring for optimization"""
-    
-    def __init__(self):
-        self.metrics = {}
-    
-    def record_timing(self, operation: str, duration: float):
-        if operation not in self.metrics:
-            self.metrics[operation] = []
-        self.metrics[operation].append(duration)
-    
-    def get_average_time(self, operation: str) -> float:
-        if operation not in self.metrics:
-            return 0.0
-        return sum(self.metrics[operation]) / len(self.metrics[operation])
-    
-    def get_performance_report(self) -> Dict[str, float]:
-        return {
-            operation: self.get_average_time(operation) 
-            for operation in self.metrics
-        }
-
-# Global performance monitor
-performance_monitor = PerformanceMonitor()
+    # RENAMED: Calling the renamed method
+    return await extractor.extract_text_from_document(file_base64_data, file_extension, context_log_id=record_id)

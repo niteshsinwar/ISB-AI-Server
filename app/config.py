@@ -24,7 +24,13 @@ SALESFORCE_ORGS: Dict[str, Dict[str, Any]] = {
         "client_id": os.getenv("UAT_SALESFORCE_CLIENT_ID"),
         "client_secret": os.getenv("UAT_SALESFORCE_CLIENT_SECRET"),
         "token_url": os.getenv("UAT_SALESFORCE_TOKEN_URL"),
+    },
+     "prod": {
+        "client_id": os.getenv("PROD_SALESFORCE_CLIENT_ID"),
+        "client_secret": os.getenv("PROD_SALESFORCE_CLIENT_SECRET"),
+        "token_url": os.getenv("PROD_SALESFORCE_TOKEN_URL"),
     }
+
 }
 
 # --- Salesforce Object and Field API Names ---
@@ -57,6 +63,18 @@ EMPLOYMENT_LOG_FIELD_TO_PARENT_APP: str = "Application__c"
 EMPLOYMENT_LOG_FIELD_TO_DETAIL: str = "Affiliation__c"
 TEST_SCORE_OBJECT_API_NAME: str = "hed__Test__c"
 TEST_SCORE_LOOKUP_TO_PARENT_APP: str = "Application__c"
+# NEW: DocumentChecklistItem fields
+DCI_OBJECT_API_NAME: str = "DocumentChecklistItem"
+DCI_PARENT_LOOKUP_FIELD: str = "ParentRecordId"
+DCI_STATUS_FIELD: str = "Status"
+
+READABLE_OBJECT_NAMES: Dict[str, str] = {
+    APPLICATION_OBJECT_API_NAME: "Personal Detail",
+    EDUCATION_LOG_OBJECT_API_NAME: "Education Records",
+    EMPLOYMENT_LOG_OBJECT_API_NAME: "Employment Records",
+    TEST_SCORE_OBJECT_API_NAME: "Test Score Records",
+    DCI_OBJECT_API_NAME: "Resume Detail"
+}
 
 # Apex REST Endpoint paths
 APEX_ENDPOINT_PATHS: Dict[str, str] = {
@@ -81,11 +99,11 @@ TEMP_HTML_SYNTHESIS: float = float(os.getenv("TEMP_HTML_SYNTHESIS"))
 CONFIDENCE_PICKLIST_RANGES: List[str] = [ '100', '90 to 99', '80 to 90', '40 to 80', '0 to 40' ]
 
 # --- API Rate Limiting and Processing Configuration ---
-MAX_CONCURRENT_PROCESSING_SLOTS: int = int(os.getenv("MAX_CONCURRENT_PROCESSING_SLOTS", "12"))
+MAX_CONCURRENT_PROCESSING_SLOTS: int = int(os.getenv("MAX_CONCURRENT_PROCESSING_SLOTS", "15"))
 ACTIVE_PROCESSING_TIMEOUT_SECONDS: int = int(os.getenv("ACTIVE_PROCESSING_TIMEOUT_SECONDS", "360"))
-MAX_CLIENT_REQUESTS_PER_WINDOW: int = int(os.getenv("MAX_CLIENT_REQUESTS_PER_WINDOW", "15"))
-SUSPICIOUS_THRESHOLD_REQUESTS: int = int(os.getenv("SUSPICIOUS_THRESHOLD_REQUESTS", "25"))
-MAX_GLOBAL_REQUESTS_PER_WINDOW: int = int(os.getenv("MAX_GLOBAL_REQUESTS_PER_WINDOW", "40"))
+MAX_CLIENT_REQUESTS_PER_WINDOW: int = int(os.getenv("MAX_CLIENT_REQUESTS_PER_WINDOW", "30"))
+SUSPICIOUS_THRESHOLD_REQUESTS: int = int(os.getenv("SUSPICIOUS_THRESHOLD_REQUESTS", "40"))
+MAX_GLOBAL_REQUESTS_PER_WINDOW: int = int(os.getenv("MAX_GLOBAL_REQUESTS_PER_WINDOW", "60"))
 SUSPICIOUS_BLOCK_DURATION_SECONDS: int = int(os.getenv("SUSPICIOUS_BLOCK_DURATION_SECONDS", "300"))
 GLOBAL_RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("GLOBAL_RATE_LIMIT_WINDOW_SECONDS", "60"))
 CLIENT_RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("CLIENT_RATE_LIMIT_WINDOW_SECONDS", "60"))
@@ -133,12 +151,24 @@ RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
             "field_api_name": "RecordTypeName__c",
             "allowed_values": ["GMAT_FOCUS", "GMAT", "GRE"]
         }
+    },
+    {
+        "target_record_type": DCI_OBJECT_API_NAME,
+        "retrieval_method": "direct",
+        "lookup_on_child_to_parent": DCI_PARENT_LOOKUP_FIELD,
+        "processor_module": "app.processors.resume_processor",
+        "processor_function_name": "process_single_resume_detail",
+        "filtering_criteria": {
+            "field_api_name": "Name",
+            "operator": "LIKE",
+            "value": "%resume%"
+        }
     }
 ]
 
 # --- Text Extraction Prompts ---
 MAX_SALESFORCE_REPORT_LENGTH: int = 131072
-MAX_CONCURRENT_OCR_PAGES: int = int(os.getenv("MAX_CONCURRENT_OCR_PAGES", "7"))
+MAX_CONCURRENT_OCR_PAGES: int = int(os.getenv("MAX_CONCURRENT_OCR_PAGES", "20"))
 RAW_OCR_PROMPT = """
 You are a high-precision Optical Character Recognition (OCR) engine. Your only task is to transcribe ALL text from the provided image, exactly as it appears. Maintain the original spatial layout as best as possible. Do not interpret, format, or analyze the content. Output only the raw, transcribed text.
 """

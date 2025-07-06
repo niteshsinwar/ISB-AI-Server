@@ -1,3 +1,5 @@
+# project_root/app/core/job_manager.py
+
 import asyncio
 import logging
 import uuid
@@ -6,7 +8,6 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
 
-# MODIFIED: SalesforceService is now just a type hint, not a dependency here
 from app.services.salesforce_service import SalesforceService
 from .rate_limit_state import acquire_processing_slot, release_processing_slot, get_active_processing_slots_count
 
@@ -25,21 +26,17 @@ class Job(BaseModel):
     is_stale: bool = False
 
 class JobManager:
-    # MODIFIED: __init__ no longer takes sf_service
     def __init__(self):
         self._active_jobs: Dict[str, Job] = {}
         self._lock = asyncio.Lock()
 
-    # MODIFIED: All methods that interact with Salesforce now require an sf_service instance
     async def create_job(self, application_id: str, client_fingerprint: str, sf_service: SalesforceService) -> Job:
         async with self._lock:
-            # Invalidate any older job for the same application
             if application_id in self._active_jobs:
                 self._active_jobs[application_id].is_stale = True
             
             new_job = Job(application_id=application_id, client_fingerprint=client_fingerprint)
             
-            # Uses the provided sf_service to upsert the job record in the correct org
             sf_job_id = await sf_service.upsert_ai_server_job(
                 job_id=new_job.job_id,
                 application_id=new_job.application_id,
@@ -57,12 +54,13 @@ class JobManager:
     async def begin_processing(self, job: Job, sf_service: SalesforceService):
         await acquire_processing_slot()
         logger.info(f"Acquired processing slot for job {job.job_id} (App: {job.application_id})")
+        
+
         await self.update_status(
             job.application_id,
             job.job_id,
             "processing",
-            message="Acquired slot, starting analysis.",
-            progress={"main_application": {"status": "processing"}},
+            message="Acquired slot, initializing analysis.",
             sf_service=sf_service
         )
 
@@ -87,7 +85,6 @@ class JobManager:
             if progress:
                 job.progress = progress
 
-        # Uses the provided sf_service to update the status in the correct org
         await sf_service.upsert_ai_server_job(
             job_id=job.job_id,
             application_id=job.application_id,
@@ -101,7 +98,6 @@ class JobManager:
             if active_job := self._active_jobs.get(application_id):
                 return active_job.model_dump()
         
-        # Uses the provided sf_service for the fallback query to the correct org
         logger.info(f"No active job for App {application_id} in memory. Querying Salesforce org {sf_service.instance_url}.")
         return await sf_service.get_latest_ai_server_job(application_id)
 
@@ -127,7 +123,6 @@ class JobManager:
             original_status = job.model_dump()
             logger.warning(f"Admin clearing job {job.job_id} for App {application_id} in org {sf_service.instance_url}")
             
-            # Uses the provided sf_service to update the job as failed in the correct org
             await sf_service.upsert_ai_server_job(
                 job_id=job.job_id,
                 application_id=job.application_id,
@@ -141,7 +136,6 @@ class JobManager:
             del self._active_jobs[application_id]
             return True, original_status
 
-# MODIFIED: The dependency is now a simple singleton for the manager itself, with no SF dependency
 _job_manager_instance: Optional[JobManager] = None
 _job_manager_lock = asyncio.Lock()
 async def get_job_manager_dependency() -> JobManager:

@@ -1,3 +1,5 @@
+# project_root/app/endpoints/application_endpoints.py
+
 import logging
 import asyncio
 import importlib
@@ -10,7 +12,8 @@ from app.services.salesforce_service import SalesforceService
 from app.config import (
     RELATED_RECORD_PROCESSING_CONFIG,
     APPLICATION_OBJECT_API_NAME,
-    MAX_CONCURRENT_PROCESSING_SLOTS
+    MAX_CONCURRENT_PROCESSING_SLOTS,
+    READABLE_OBJECT_NAMES
 )
 from app.core.rate_limit_state import (
     generate_client_fingerprint,
@@ -35,8 +38,7 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
     """
     router = APIRouter()
 
-    # MODIFIED: This helper function now reads 'order_by' and 'limit' from the config
-    # and passes them to the Salesforce service.
+    # This helper function is unchanged
     async def fetch_initial_related_records_metadata(
         sf_service: SalesforceService,
         application_record_id: str
@@ -50,8 +52,6 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
             
             ids, error = [], None
             try:
-                # MODIFIED: Pass the new sorting and limiting arguments from the config.
-                # The .get() method is used to safely retrieve the optional keys.
                 ids = await asyncio.to_thread(
                     sf_service.get_directly_related_record_ids,
                     parent_record_id=application_record_id,
@@ -77,6 +77,7 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
             }
         return metadata_list, data_for_bg
 
+    # MODIFIED: The background task now implements "fail-fast" logic.
     async def process_application_and_related_records_bg(
         job: Job,
         sf_service: SalesforceService,
@@ -87,23 +88,40 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
         progress = job.progress
 
         try:
-            # Step 1: Process Main Application
-            app_summary = await process_single_application_detail(
+            # 1. Initialize all items with "pending" status for immediate visibility in Salesforce
+            progress[READABLE_OBJECT_NAMES[APPLICATION_OBJECT_API_NAME]] = {"status": "pending", "total": 1, "processed": 0}
+            for record_type, data in prefetched_data.items():
+                readable_name = READABLE_OBJECT_NAMES.get(record_type, record_type)
+                progress[readable_name] = {"status": "pending", "total": len(data.get("ids", [])), "processed": 0}
+            
+            await job_manager.update_status(job.application_id, job.job_id, "processing", sf_service, progress=progress, message="Initialized job scope. Starting analysis...")
+
+            # 2. Process Personal Detail (Main Application)
+            personal_detail_key = READABLE_OBJECT_NAMES[APPLICATION_OBJECT_API_NAME]
+            progress[personal_detail_key]["status"] = "processing"
+            await job_manager.update_status(job.application_id, job.job_id, "processing", sf_service, progress=progress)
+            
+            # If this fails, the main except block will catch it and fail the whole job
+            await process_single_application_detail(
                 sf_service=sf_service, application_id=job.application_id, parent_application_id=job.application_id,
                 application_object_api_name=APPLICATION_OBJECT_API_NAME
             )
-            progress["main_application"] = {"status": "completed", "details": app_summary}
+            progress[personal_detail_key]["status"] = "completed"
+            progress[personal_detail_key]["processed"] = 1
             await job_manager.update_status(job.application_id, job.job_id, "processing", sf_service, progress=progress)
 
-            # Step 2: Process Related Records
+            # 3. Process all related records with fail-fast logic
             for record_type, data in prefetched_data.items():
                 if job.is_stale: raise asyncio.CancelledError("Job has become stale and was cancelled.")
                 
+                readable_name = READABLE_OBJECT_NAMES.get(record_type, record_type)
+                
                 if not data.get("ids"):
-                    progress[record_type] = {"status": "skipped", "details": "No records to process."}
+                    progress[readable_name]["status"] = "skipped"
+                    await job_manager.update_status(job.application_id, job.job_id, "processing", sf_service, progress=progress)
                     continue
                 
-                progress[record_type] = {"status": "processing", "total": len(data["ids"]), "processed": 0, "errors": 0}
+                progress[readable_name]["status"] = "processing"
                 await job_manager.update_status(job.application_id, job.job_id, "processing", sf_service, progress=progress)
                 
                 module = importlib.import_module(data["processor_module"])
@@ -112,30 +130,32 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
                 for i, r_id in enumerate(data["ids"]):
                     if job.is_stale: raise asyncio.CancelledError("Job has become stale and was cancelled.")
                     
-                    progress[record_type]["details"] = f"Processing record {i+1} of {len(data['ids'])} (ID: {r_id[:8]}...)"
-                    await job_manager.update_status(job.application_id, job.job_id, "processing", sf_service, progress=progress)
-                    
+                    # --- REVERTED: The processor call is now direct. Any exception will halt the job. ---
                     await func(sf_service, r_id, job.application_id, item_index=(i + 1))
-                    progress[record_type]["processed"] += 1
+                    
+                    progress[readable_name]["processed"] += 1
+                    await job_manager.update_status(job.application_id, job.job_id, "processing", sf_service, progress=progress)
                 
-                progress[record_type]["status"] = "completed"
-                progress[record_type]["details"] = "All records processed successfully."
+                progress[readable_name]["status"] = "completed"
                 await job_manager.update_status(job.application_id, job.job_id, "processing", sf_service, progress=progress)
-
-            await job_manager.update_status(job.application_id, job.job_id, "completed", sf_service, message="All tasks completed successfully.", progress=progress)
+            
+            # --- REVERTED: If the code reaches here, it means everything succeeded. ---
+            final_status = "completed"
+            final_message = "All verification tasks completed successfully."
+            await job_manager.update_status(job.application_id, job.job_id, final_status, sf_service, message=final_message, progress=progress)
 
         except asyncio.CancelledError:
             logger.warning(f"Job {job.job_id} for App {job.application_id} was cancelled because it became stale.")
             await job_manager.update_status(job.application_id, job.job_id, "failed", sf_service, message="Job cancelled due to a newer request.", progress=progress)
         except Exception as e:
-            error_msg = f"Job failed: {str(e)}"
-            logger.error(f"Job {job.job_id}: CRITICAL error for App ID {job.application_id}: {e}", exc_info=True)
-            failed_stage = next((k for k, v in progress.items() if v.get("status") == "processing"), "unknown_stage")
-            progress[failed_stage] = {"status": "failed", "details": error_msg}
+            # This catches the FIRST critical failure and halts the job.
+            error_msg = str(e) # This will contain the structured error from the processor.
+            logger.error(f"Job {job.job_id}: A critical error halted processing for App ID {job.application_id}: {error_msg}", exc_info=True)
             await job_manager.update_status(job.application_id, job.job_id, "failed", sf_service, message=error_msg, progress=progress)
         finally:
             await job_manager.release_and_finalize(job)
 
+    # --- The API endpoints below are unchanged ---
     @router.post("/analyze", response_model=AnalyzeApplicationResponse)
     async def analyze_application_endpoint(
         req: Request,
@@ -162,7 +182,6 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
         if not ok: raise HTTPException(status_code=429, detail=msg)
             
         try:
-            # CRITICAL: Pass sf_service to create the job in the correct org
             new_job = await job_manager.create_job(app_id, client_fp, sf_service=sf_service)
             metadata, bg_data = await fetch_initial_related_records_metadata(sf_service, app_id)
             bg_tasks.add_task(process_application_and_related_records_bg, new_job, sf_service, job_manager, bg_data)
@@ -193,7 +212,6 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
         if not (isinstance(application_id, str) and len(application_id) in [15, 18]):
             raise HTTPException(status_code=400, detail="Invalid application_id format.")
         
-        # CRITICAL: Pass sf_service to get the job status from the correct org
         status_info = await job_manager.get_job_status(application_id, sf_service=sf_service)
         if not status_info:
             raise HTTPException(status_code=404, detail=f"No processing record found for {application_id}")
