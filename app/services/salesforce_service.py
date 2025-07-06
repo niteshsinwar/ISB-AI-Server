@@ -82,11 +82,29 @@ class SalesforceService:
             self._connect()
 
     def _call_sf_api_with_retry(self, api_call_func: Callable, *args, **kwargs) -> Any:
+        """
+        Calls a Salesforce API function with intelligent retry logic for session issues.
+        """
         try:
             self._ensure_connected()
             return api_call_func(*args, **kwargs)
-        except (SalesforceAuthenticationFailed, SalesforceExpiredSession, requests.exceptions.ConnectionError):
-            logger.warning("Salesforce session issue detected. Reconnecting and retrying.")
+        except (SalesforceAuthenticationFailed, SalesforceExpiredSession):
+            logger.warning("Salesforce session expired. Reconnecting and retrying...")
+            self._connect()
+            return api_call_func(*args, **kwargs)
+        except requests.exceptions.HTTPError as e:
+            # Only retry on 401 (Unauthorized) or 403 (Forbidden), which indicate a session issue.
+            if e.response.status_code in [401, 403]:
+                logger.warning(f"Salesforce authentication error (Status: {e.response.status_code}). Reconnecting and retrying...")
+                self._connect()
+                # Retry the original call one more time with the new session
+                return api_call_func(*args, **kwargs)
+            else:
+                # For all other HTTP errors (e.g., 400, 404, 500), do not retry. Re-raise immediately.
+                raise e
+        except requests.exceptions.ConnectionError:
+            # This handles network-level connection issues
+            logger.warning(f"Salesforce connection error detected. Reconnecting and retrying...")
             self._connect()
             return api_call_func(*args, **kwargs)
 
