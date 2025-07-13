@@ -158,11 +158,25 @@ RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
         "lookup_on_child_to_parent": DCI_PARENT_LOOKUP_FIELD,
         "processor_module": "app.processors.resume_processor",
         "processor_function_name": "process_single_resume_detail",
-        "filtering_criteria": {
-            "field_api_name": "Name",
-            "operator": "LIKE",
-            "value": "%resume%"
+        "filtering_criteria": [
+    {
+        "field_api_name": "Name",
+        "operator": "LIKE",
+        "value": "%resume%"
+    },
+    {
+        # Define the anti-join subquery explicitly
+        "subquery_filter": {
+            "field": "ParentRecordId",
+            "operator": "NOT IN",
+            "subquery": {
+                "object": "hed__Application__c", 
+                "select_field": "Id",
+                "where_clause": "ApplyingTo__c LIKE '%AMP%'"
+            }
         }
+    }
+]
     }
 ]
 

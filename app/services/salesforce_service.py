@@ -83,29 +83,24 @@ class SalesforceService:
 
     def _call_sf_api_with_retry(self, api_call_func: Callable, *args, **kwargs) -> Any:
         """
-        Calls a Salesforce API function with intelligent retry logic for session issues.
+        Calls a Salesforce API function with a robust retry mechanism.
+        If any error occurs, it forces a reconnection and retries the call once.
         """
         try:
             self._ensure_connected()
             return api_call_func(*args, **kwargs)
-        except (SalesforceAuthenticationFailed, SalesforceExpiredSession):
-            logger.warning("Salesforce session expired. Reconnecting and retrying...")
+        except Exception as e:
+            # Catch any exception on the first attempt.
+            logger.warning(
+                f"An operation failed with error: {type(e).__name__}. "
+                f"Attempting a forced reconnect and retrying the operation once."
+            )
+            
+            # Force a new connection session.
             self._connect()
-            return api_call_func(*args, **kwargs)
-        except requests.exceptions.HTTPError as e:
-            # Only retry on 401 (Unauthorized) or 403 (Forbidden), which indicate a session issue.
-            if e.response.status_code in [401, 403]:
-                logger.warning(f"Salesforce authentication error (Status: {e.response.status_code}). Reconnecting and retrying...")
-                self._connect()
-                # Retry the original call one more time with the new session
-                return api_call_func(*args, **kwargs)
-            else:
-                # For all other HTTP errors (e.g., 400, 404, 500), do not retry. Re-raise immediately.
-                raise e
-        except requests.exceptions.ConnectionError:
-            # This handles network-level connection issues
-            logger.warning(f"Salesforce connection error detected. Reconnecting and retrying...")
-            self._connect()
+            
+            # Retry the call. If this second attempt fails, the exception will
+            # be raised, as requested.
             return api_call_func(*args, **kwargs)
 
     def get_record_detail_from_apex(self, record_id: str, sobject_api_name_key: str) -> Dict[str, Any]:
@@ -273,21 +268,48 @@ class SalesforceService:
 
         soql = f"SELECT Id FROM {child_object_api_name} WHERE {lookup_field_on_child_to_parent} = '{parent_record_id}'"
 
-        if filtering_criteria and isinstance(filtering_criteria, dict):
-            field_name = filtering_criteria.get("field_api_name")
-            if not field_name:
-                logging.warning(f"Filter for {child_object_api_name} is missing 'field_api_name'. Ignoring.")
-            elif "allowed_values" in filtering_criteria:
-                allowed_values = filtering_criteria.get("allowed_values")
-                if isinstance(allowed_values, list) and allowed_values:
-                    formatted_values = ', '.join(f"'{val}'" for val in allowed_values)
-                    soql += f" AND {field_name} IN ({formatted_values})"
-                else:
-                    logging.warning(f"Filter key 'allowed_values' for {child_object_api_name} is not a valid list. Ignoring.")
-            elif "operator" in filtering_criteria and "value" in filtering_criteria:
-                operator = filtering_criteria.get("operator")
-                value = filtering_criteria.get("value")
-                soql += f" AND {field_name} {operator} '{value}'"
+        # MODIFICATION START: Handle more complex filtering logic
+        if filtering_criteria:
+            # Normalize to a list to handle both a single dict and a list of dicts
+            filters = filtering_criteria if isinstance(filtering_criteria, list) else [filtering_criteria]
+
+            for f in filters:
+                if not isinstance(f, dict):
+                    logging.warning(f"Ignoring invalid filter item for {child_object_api_name}: {f}")
+                    continue
+
+                # Handle subquery filter criteria
+                if "subquery_filter" in f:
+                    sqf = f.get("subquery_filter", {})
+                    subquery = sqf.get("subquery", {})
+                    if all([sqf.get("field"), sqf.get("operator"), subquery.get("object"), subquery.get("select_field"), subquery.get("where_clause")]):
+                        soql += (
+                            f" AND {sqf['field']} {sqf['operator']} "
+                            f"(SELECT {subquery['select_field']} FROM {subquery['object']} "
+                            f"WHERE {subquery['where_clause']})"
+                        )
+                    else:
+                        logging.warning(f"Invalid or incomplete subquery filter for {child_object_api_name}. Ignoring.")
+                    continue
+
+                # Handle standard field filters
+                field_name = f.get("field_api_name")
+                if not field_name:
+                    logging.warning(f"Filter for {child_object_api_name} is missing 'field_api_name'. Ignoring.")
+                    continue
+
+                if "allowed_values" in f:
+                    allowed_values = f.get("allowed_values")
+                    if isinstance(allowed_values, list) and allowed_values:
+                        formatted_values = ', '.join(f"'{val}'" for val in allowed_values)
+                        soql += f" AND {field_name} IN ({formatted_values})"
+                    else:
+                        logging.warning(f"Filter key 'allowed_values' for {child_object_api_name} is not a valid list. Ignoring.")
+                elif "operator" in f and "value" in f:
+                    operator = f.get("operator")
+                    value = f.get("value")
+                    soql += f" AND {field_name} {operator} '{value}'"
+        # MODIFICATION END
 
         if order_by:
             soql += f" ORDER BY {order_by}"
@@ -296,6 +318,7 @@ class SalesforceService:
 
         logger.info(f"Executing filtered query for related records: {soql}")
         try:
+            # Assuming _call_sf_api_with_retry and self.sf.query_all are defined
             result = self._call_sf_api_with_retry(self.sf.query_all, soql)
             return [rec['Id'] for rec in result['records']]
         except Exception as e:
