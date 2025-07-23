@@ -40,6 +40,29 @@ async def process_single_test_score_detail(
         )
         
         record_data = details.get("recordData", {})
+        
+        # **EARLY CHECK FOR ONLINE TEST MODE** 
+        if record_data.get('Test_Mode') == 'Online':
+            logger.info(f"Online test mode detected for {test_score_id}. Skipping document verification.")
+            
+            name_suffix = record_data.get('RecordTypeName__c') or item_index or test_score_id
+            summary_name = f"Test Score Analysis ({name_suffix})"
+            
+            # Direct update without document processing
+            summary_id = await asyncio.to_thread(
+                sf_service.upsert_verification_summary,
+                application_id=parent_application_id,
+                report_content='',
+                name_value=summary_name,
+                overall_feedback="Test mode is online, Which is Invalid",
+                confidence_range=40,
+                test_id=test_score_id
+            )
+            
+            logger.info(f"Successfully processed Online {readable_name} {test_score_id}. AVS ID: {summary_id}")
+            return  # Exit early, skip all document processing
+        
+        # **CONTINUE WITH NORMAL PROCESSING FOR NON-ONLINE TESTS**
         document_payload = details.get("documentPayload")
 
         if not document_payload:
@@ -54,18 +77,25 @@ async def process_single_test_score_detail(
 
         ts_crew = TestScoreVerificationCrewOrchestrator(record_data, document_text_string)
         report_dict = await asyncio.to_thread(ts_crew.run)
+        
         if not report_dict:
             raise ValueError("Crew did not return a valid report.")
 
         name_suffix = record_data.get('RecordTypeName__c') or item_index or test_score_id
         summary_name = f"Test Score Analysis ({name_suffix})"
+        
+        # Normal processing results
+        overall_feedback = report_dict.get('overall_feedback', 'No feedback provided.')
+        confidence = report_dict.get('confidence_range', 50)
+        report_content = report_dict.get('field_comparison_summary', '')[:MAX_SALESFORCE_REPORT_LENGTH]
+        
         summary_id = await asyncio.to_thread(
             sf_service.upsert_verification_summary,
             application_id=parent_application_id,
-            report_content=report_dict.get('field_comparison_summary', '')[:MAX_SALESFORCE_REPORT_LENGTH],
+            report_content=report_content,
             name_value=summary_name,
-            overall_feedback=report_dict.get('overall_feedback'),
-            confidence_range=report_dict.get('confidence_range'),
+            overall_feedback=overall_feedback,
+            confidence_range=confidence,
             test_id=test_score_id
         )
         

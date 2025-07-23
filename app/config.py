@@ -135,11 +135,14 @@ RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
         "lookup_on_child_to_parent": EMPLOYMENT_LOG_FIELD_TO_PARENT_APP,
         "processor_module": "app.processors.employment_processor",
         "processor_function_name": "process_single_employment_detail",
-        # NEW: Sorting and limiting rules to get only the latest record.
-        # The relationship name 'Affiliation__r' is used to access the start date
-        # on the related hed__Affiliation__c object for sorting.
         "order_by": "Affiliation__r.hed__StartDate__c DESC NULLS LAST",
-        "limit": 1
+        "limit": 1,
+        "filtering_criteria": {
+            "field_api_name": "Affiliation__r.Type_of_Employment__c",
+            "allowed_values": [
+                'Full-Time'
+            ]
+        }
     },
     {
         "target_record_type": TEST_SCORE_OBJECT_API_NAME,

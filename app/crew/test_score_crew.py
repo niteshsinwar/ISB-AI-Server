@@ -34,7 +34,7 @@ class ValidatedCrewReport(BaseModel):
 
 # Fields to Exclude
 FIELDS_TO_EXCLUDE_FROM_PROCESSING: List[str] = [
-     'Applicant__c', 'type', 'Contact', 'recordId', 'Task_Id','triggeringLogId','Id', 'DocumentchecklistItem_Id']
+     'Applicant__c', 'type', 'Contact', 'recordId', 'Task_Id','triggeringLogId','Id','Test_Mode', 'DocumentchecklistItem_Id']
 
 # LLM Initialization
 llm_comparator = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, GOOGLE_API_KEY)
