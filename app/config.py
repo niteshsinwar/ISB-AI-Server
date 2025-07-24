@@ -138,7 +138,7 @@ RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
         "order_by": "Affiliation__r.hed__StartDate__c DESC NULLS LAST",
         "limit": 1,
         "filtering_criteria": {
-            "field_api_name": "Affiliation__r.Type_of_Employment__c",
+            "field_api_name": "Type_of_Employment__c",
             "allowed_values": [
                 'Full-Time'
             ]
