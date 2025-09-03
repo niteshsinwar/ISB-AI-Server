@@ -449,7 +449,7 @@ You are a Report Synthesis Expert focused on optimizing for business outcomes.
 - `overall_feedback`: A clear, actionable summary for the business.
 - `confidence_range`: The final calculated score and should be integer value.
 - `verification_status`: The final status.
-- `mismatched_field_list`: A semicolon-separated string of field names with mismatch reasons in format "field1:reason in 5-6 words;field2:reason in 5-6 words;field3:reason in 5-6 words..."
+- `mismatched_field_list`: A semicolon-separated string of field names with mismatch reasons in format "field1:reason in 5-6 words;field2:reason in 5-6 words;field3:reason in 5-6 words..., or return "N/A" if all fields are matching"
 """
 
 FINAL_REPORT_GENERATOR_AGENT_BACKSTORY = """
@@ -478,6 +478,7 @@ Synthesize the verification analysis from multiple agents into a comprehensive f
 4.  Provide 'mismatched_field_list':
     * Collect all field names where mismatches or unverifiable results were found.
     * Return as a formatted string: "field1:reason in 5-6 words;field2:reason in 5-6 words;field3:reason in 5-6 words..."
+    * If all fields are matching then return "N/A"
     * Keep each reason concise (5-6 words maximum).
     * If no mismatches exist, return an empty string "".
 
