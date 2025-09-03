@@ -69,6 +69,7 @@ async def process_single_education_history_detail(
             name_value=summary_name,
             overall_feedback=report_dict.get('overall_feedback'),
             confidence_range=report_dict.get('confidence_range'),
+            mismatched_field_list=report_dict.get('mismatched_field_list'),
             education_history_id=actual_education_detail_id
         )
         

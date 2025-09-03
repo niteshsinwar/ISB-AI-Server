@@ -96,6 +96,7 @@ async def process_single_test_score_detail(
             name_value=summary_name,
             overall_feedback=overall_feedback,
             confidence_range=confidence,
+            mismatched_field_list=report_dict.get('mismatched_field_list'),
             test_id=test_score_id
         )
         

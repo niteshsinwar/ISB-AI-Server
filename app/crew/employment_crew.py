@@ -31,6 +31,7 @@ class ValidatedCrewReport(BaseModel):
     field_comparison_summary: constr(min_length=1)
     overall_feedback: constr(min_length=1)
     confidence_range: int = Field(..., ge=0, le=100)
+    mismatched_field_list: constr(min_length=1)
 
 # Fields to Exclude
 FIELDS_TO_EXCLUDE_FROM_PROCESSING: List[str] = [

@@ -449,6 +449,7 @@ You are a Report Synthesis Expert focused on optimizing for business outcomes.
 - `overall_feedback`: A clear, actionable summary for the business.
 - `confidence_range`: The final calculated score and should be integer value.
 - `verification_status`: The final status.
+- `mismatched_field_list`: A semicolon-separated string of field names with mismatch reasons in format "field1:reason in 5-6 words;field2:reason in 5-6 words;field3:reason in 5-6 words..."
 """
 
 FINAL_REPORT_GENERATOR_AGENT_BACKSTORY = """
@@ -474,6 +475,12 @@ Synthesize the verification analysis from multiple agents into a comprehensive f
     * If critical mismatches exist, state them clearly (e.g., "Verification failed due to a critical mismatch in Company Name.").
     * If all critical fields passed, state "All critical fields verified successfully. Minor non-critical variations were noted and automatically passed."
 
+4.  Provide 'mismatched_field_list':
+    * Collect all field names where mismatches or unverifiable results were found.
+    * Return as a formatted string: "field1:reason in 5-6 words;field2:reason in 5-6 words;field3:reason in 5-6 words..."
+    * Keep each reason concise (5-6 words maximum).
+    * If no mismatches exist, return an empty string "".
+
 **Analysis to Process (from previous agents):**
 {context}
 
@@ -486,7 +493,8 @@ A business-focused JSON object optimized for automated decision-making:
   "field_comparison_summary": "<div style='font-family: Arial;'><table style='width: 100%; border-collapse: collapse; border: 1px solid #ddd;'>...</table></div>",
   "overall_feedback": "All critical fields verified successfully. Minor non-critical variations were noted and automatically passed.",
   "confidence_range": 100,
-  "verification_status": "Passed"
+  "verification_status": "Passed",
+  "mismatched_field_list": "adharCard:document number format invalid;Passport:expiry date not found;Gender:value missing from document;TotalMarks:score calculation mismatch"
 }
 """
 

@@ -23,7 +23,7 @@ from app.config import (
     AVS_APPLICATION_LOOKUP_FIELD, AVS_CONTACT_LOOKUP_FIELD,
     AVS_EDUCATION_HISTORY_LOOKUP_FIELD, AVS_TEST_LOOKUP_FIELD,
     AVS_AFFILIATION_LOOKUP_FIELD, AVS_REPORT_FIELD, AVS_NAME_FIELD,
-    AVS_OVERALL_FEEDBACK_FIELD, AVS_CONFIDENCE_FIELD, AVS_TASK_DCI_LOOKUP_FIELD,
+    AVS_OVERALL_FEEDBACK_FIELD, AVS_MISMATCHED_LIST_FIELD, AVS_CONFIDENCE_FIELD, AVS_TASK_DCI_LOOKUP_FIELD,
     AI_SERVER_JOB_OBJECT_API_NAME, AIJ_APPLICATION_LOOKUP_FIELD, AIJ_JOB_ID_FIELD,
     AIJ_STATUS_FIELD, AIJ_MESSAGE_FIELD, AIJ_PROGRESS_FIELD, AIJ_CLIENT_FP_FIELD,
     DCI_OBJECT_API_NAME, DCI_STATUS_FIELD,
@@ -205,6 +205,7 @@ class SalesforceService:
         payload = {AVS_REPORT_FIELD: report_content, AVS_NAME_FIELD: name_value, AVS_APPLICATION_LOOKUP_FIELD: application_id}
         if val := kwargs.get('overall_feedback'): payload[AVS_OVERALL_FEEDBACK_FIELD] = val
         if val := kwargs.get('confidence_range'): payload[AVS_CONFIDENCE_FIELD] = val
+        if val := kwargs.get('mismatched_field_list'): payload[AVS_MISMATCHED_LIST_FIELD] = val
         
         secondary_field, secondary_id = None, None
         if val := kwargs.get('contact_id'): secondary_field, secondary_id = AVS_CONTACT_LOOKUP_FIELD, val

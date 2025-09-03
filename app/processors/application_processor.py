@@ -74,6 +74,7 @@ async def process_single_application_detail(
             name_value=summary_name,
             overall_feedback=report_dict.get('overall_feedback'),
             confidence_range=report_dict.get('confidence_range'),
+            mismatched_field_list=report_dict.get('mismatched_field_list'),
             contact_id=contact_id
         )
         

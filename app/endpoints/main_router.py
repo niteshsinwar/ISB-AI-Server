@@ -4,7 +4,6 @@ from fastapi import APIRouter
 from app.endpoints.application_endpoints import create_application_router
 from app.endpoints.admin_endpoints import create_admin_router
 from app.services.salesforce_service import get_salesforce_service, get_default_dev_service
-from .legacy_endpoints import router as legacy_router
 
 main_api_router = APIRouter()
 
@@ -33,8 +32,6 @@ main_api_router.include_router(multi_org_admin_router, prefix="/{org_alias}/api/
 # New Prefix for default: /api/v1/admin
 main_api_router.include_router(default_admin_router, prefix="/api/v1/admin", tags=["Administration & Health (Default to Dev)"])
 
-# C. Legacy and Root Routes
-main_api_router.include_router(legacy_router, tags=["Legacy"])
 
 @main_api_router.get("/", tags=["Root"])
 async def read_api_root():

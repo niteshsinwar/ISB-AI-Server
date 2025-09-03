@@ -110,6 +110,8 @@ ehthumbs.db
 #敏感文件
 *.pem
 *.key
+*.crt
+certs/
 credentials.json
 # Add any other sensitive files or specific local config files
 

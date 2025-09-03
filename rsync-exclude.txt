@@ -7,8 +7,6 @@ __pycache__/
 *.swp
 .#*
 
-# Directory for server-specific certificates
-certs/
 
 # Virtual Environments
 venv/
