@@ -6,7 +6,7 @@ from typing import Dict, Any, List, Literal
 from crewai import Agent, Task, Crew, Process
 from pydantic import BaseModel, Field, constr
 from app.config import (
-    GOOGLE_API_KEY, CONFIDENCE_PICKLIST_RANGES,
+    CREW_GOOGLE_API_KEY, CONFIDENCE_PICKLIST_RANGES,
     MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION,
     MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS
 )
@@ -38,8 +38,8 @@ FIELDS_TO_EXCLUDE_FROM_PROCESSING: List[str] = [
      'Applicant__c', 'type', 'Contact', 'recordId', 'Task_Id','triggeringLogId','Id', 'DocumentchecklistItem_Id']
 
 # LLM Initialization
-llm_comparator = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, GOOGLE_API_KEY)
-llm_reporter = initialize_llm(MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS, GOOGLE_API_KEY)
+llm_comparator = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, CREW_GOOGLE_API_KEY)
+llm_reporter = initialize_llm(MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS, CREW_GOOGLE_API_KEY)
 
 if llm_comparator and llm_reporter:
     logger.info("EmploymentCrew LLMs initialized.")

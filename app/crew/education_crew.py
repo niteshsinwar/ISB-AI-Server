@@ -6,7 +6,7 @@ from typing import Dict, Any, List, Literal
 from crewai import Agent, Task, Crew, Process
 from pydantic import BaseModel, Field, constr
 from app.config import (
-    GOOGLE_API_KEY, CONFIDENCE_PICKLIST_RANGES,
+    CREW_GOOGLE_API_KEY, CONFIDENCE_PICKLIST_RANGES,
     MODEL_COMPLEX_REASONING, TEMP_COMPLEX_REASONING,
     MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS
 )
@@ -38,8 +38,8 @@ FIELDS_TO_EXCLUDE_FROM_PROCESSING: List[str] = [
 ]
 
 # LLM Initialization
-llm_comparator = initialize_llm(MODEL_COMPLEX_REASONING, TEMP_COMPLEX_REASONING, GOOGLE_API_KEY)
-llm_reporter = initialize_llm(MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS, GOOGLE_API_KEY)
+llm_comparator = initialize_llm(MODEL_COMPLEX_REASONING, TEMP_COMPLEX_REASONING, CREW_GOOGLE_API_KEY)
+llm_reporter = initialize_llm(MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS, CREW_GOOGLE_API_KEY)
 
 if llm_comparator and llm_reporter:
     logger.info("EducationCrew LLMs initialized.")

@@ -16,7 +16,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 
 from app.config import (
-    GOOGLE_API_KEY, MODEL_TEXT_EXTRACTION, MODEL_DATA_ANALYSIS,
+    DOC_GOOGLE_API_KEY, MODEL_TEXT_EXTRACTION, MODEL_DATA_ANALYSIS,
     RAW_OCR_PROMPT, DATA_STRUCTURING_PROMPT
 )
 
@@ -37,7 +37,7 @@ class OptimizedGeminiProcessor:
     def __init__(self):
         self.llm = ChatGoogleGenerativeAI(
             model=MODEL_TEXT_EXTRACTION,
-            google_api_key=GOOGLE_API_KEY,
+            google_api_key=DOC_GOOGLE_API_KEY,
             temperature=0.1,
             request_timeout=30.0,
             max_retries=2

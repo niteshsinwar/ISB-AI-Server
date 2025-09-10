@@ -5,7 +5,7 @@ from typing import Dict, Any, Literal
 from crewai import Agent, Task, Crew, Process
 from pydantic import BaseModel, constr
 
-from app.config import GOOGLE_API_KEY, MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION
+from app.config import CREW_GOOGLE_API_KEY, MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION
 from app.crew.crew_utils import initialize_llm, clean_and_extract_json, CrewErrorHandler
 from app.crew.crew_prompts import (
     RESUME_ANALYZER_AGENT_GOAL,
@@ -22,7 +22,7 @@ class ValidatedResumeReport(BaseModel):
     reason: constr(min_length=1)
 
 # LLM Initialization
-llm_screener = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, GOOGLE_API_KEY)
+llm_screener = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, CREW_GOOGLE_API_KEY)
 if not llm_screener:
     logger.critical("Failed to initialize LLM for ResumeCrew.")
 

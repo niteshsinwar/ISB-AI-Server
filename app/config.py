@@ -86,7 +86,8 @@ APEX_ENDPOINT_PATHS: Dict[str, str] = {
 }
 
 # --- Google Gemini Configuration ---
-GOOGLE_API_KEY: str | None = os.getenv("GOOGLE_API_KEY")
+DOC_GOOGLE_API_KEY: str | None = os.getenv("DOC_GOOGLE_API_KEY")
+CREW_GOOGLE_API_KEY: str | None = os.getenv("CREW_GOOGLE_API_KEY")
 MODEL_DATA_ANALYSIS: str = os.getenv("MODEL_DATA_ANALYSIS")
 MODEL_COMPLEX_REASONING: str = os.getenv("MODEL_COMPLEX_REASONING")
 TEMP_COMPLEX_REASONING: float = float(os.getenv("TEMP_COMPLEX_REASONING"))
