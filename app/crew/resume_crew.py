@@ -21,18 +21,15 @@ class ValidatedResumeReport(BaseModel):
     status: Literal["Accepted", "Not Verified"]
     reason: constr(min_length=1)
 
-# LLM Initialization
-llm_screener = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, CREW_GOOGLE_API_KEY)
-if not llm_screener:
-    logger.critical("Failed to initialize LLM for ResumeCrew.")
+# NOTE: Per-job LLM instances will be created inside the Orchestrator to avoid global state.
 
 class ResumeVerificationAgents:
-    def resume_screener_agent(self):
+    def resume_screener_agent(self, llm_instance):
         return Agent(
             role='Resume Content Screener',
             goal=RESUME_ANALYZER_AGENT_GOAL,
             backstory=RESUME_ANALYZER_AGENT_BACKSTORY,
-            llm=llm_screener,
+            llm=llm_instance,
             verbose=True,
             allow_delegation=False,
             max_iter=3,
@@ -47,18 +44,20 @@ class ResumeVerificationTasks:
         )
 
 class ResumeVerificationCrewOrchestrator:
-    def __init__(self, document_text: str):
+    def __init__(self, document_text: str, resource_manager=None):
         self.document_text = document_text
+        self.resource_manager = resource_manager
+        # Create isolated LLM instance for this job with resource tracking
+        self.llm_screener = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, CREW_GOOGLE_API_KEY, resource_manager)
+        if not self.llm_screener:
+            raise RuntimeError("Failed to initialize LLM for ResumeCrew")
 
     @CrewErrorHandler()
     def run(self) -> Dict[str, Any]:
-        if not llm_screener:
-            raise RuntimeError("LLM for ResumeCrew is not initialized. Cannot run.")
-        
         agents = ResumeVerificationAgents()
         tasks = ResumeVerificationTasks()
 
-        screener_agent = agents.resume_screener_agent()
+        screener_agent = agents.resume_screener_agent(self.llm_screener)
         screen_task = tasks.screen_resume_task(screener_agent, self.document_text)
 
         crew = Crew(

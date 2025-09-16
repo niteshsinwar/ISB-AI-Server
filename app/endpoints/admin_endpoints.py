@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends, FastAPI
 
 from app.services.salesforce_service import SalesforceService
-from app.services.document_extraction_service import get_text_extractor
+from app.services.document_extraction_service import create_text_extractor
 from app.core.job_manager import JobManager, get_job_manager_dependency
 from app.core.app_instance import get_app_instance
 from app.schemas.responses import (
@@ -35,7 +35,7 @@ def create_admin_router(sf_service_dependency: Depends) -> APIRouter:
 
         # Check 1: Gemini/Text Extractor (Global)
         try:
-            extractor = await get_text_extractor()
+            extractor = create_text_extractor()
             model_name = "unknown"
             if hasattr(extractor, 'ocr_processor') and hasattr(extractor.ocr_processor, 'llm'):
                 model_name = extractor.ocr_processor.llm.model

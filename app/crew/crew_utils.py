@@ -6,8 +6,8 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 logger = logging.getLogger(__name__)
 
-def initialize_llm(model: str, temperature: float, api_key: str) -> Optional[ChatGoogleGenerativeAI]:
-    """Initialize the LLM with the given model and temperature."""
+def initialize_llm(model: str, temperature: float, api_key: str, resource_manager=None) -> Optional[ChatGoogleGenerativeAI]:
+    """Initialize the LLM with the given model and temperature, with optional resource tracking."""
     try:
         llm = ChatGoogleGenerativeAI(
             model=model,
@@ -15,7 +15,12 @@ def initialize_llm(model: str, temperature: float, api_key: str) -> Optional[Cha
             google_api_key=api_key,
             model_kwargs={"response_mime_type": "application/json"}
         )
-        logger.info(f"LLM initialized with model: {model}")
+
+        # Track LLM with resource manager for guaranteed cleanup
+        if resource_manager:
+            resource_manager.track_llm(llm)
+
+        logger.info(f"LLM initialized with model: {model} (resource tracking: {resource_manager is not None})")
         return llm
     except Exception as e:
         logger.error(f"Failed to initialize LLM: {e}", exc_info=True)

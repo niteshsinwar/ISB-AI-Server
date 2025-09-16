@@ -22,13 +22,19 @@ async def process_single_resume_detail(
     sf_service: "SalesforceService",
     resume_dci_id: str,
     parent_application_id: str,
+    extractor_instance: "FastDocumentExtractor" = None,
+    resource_manager=None,
     **kwargs
 ) -> str:
     readable_name = READABLE_OBJECT_NAMES.get(DCI_OBJECT_API_NAME, "Resume Detail")
     logger.info(f"Starting {readable_name} processing for DCI ID: {resume_dci_id}")
 
-    from app.services.document_extraction_service import extract_text_from_file
+    from app.services.document_extraction_service import extract_text_from_file, create_text_extractor
     from app.crew.resume_crew import ResumeVerificationCrewOrchestrator
+
+    # Use provided extractor or create a per-job extractor
+    if extractor_instance is None:
+        extractor_instance = create_text_extractor(resource_manager=resource_manager)
 
     try:
         details = await asyncio.to_thread(sf_service.get_dci_document_data, resume_dci_id)
@@ -42,10 +48,10 @@ async def process_single_resume_detail(
 
         if not base64_data or not file_extension:
             raise ValueError("Document content (base64) or file extension missing.")
-            
-        document_text_string = await extract_text_from_file(base64_data, file_extension, record_id=resume_dci_id)
-        
-        resume_crew = ResumeVerificationCrewOrchestrator(document_text=document_text_string)
+
+        document_text_string = await extract_text_from_file(base64_data, file_extension, record_id=resume_dci_id, extractor=extractor_instance, resource_manager=resource_manager)
+
+        resume_crew = ResumeVerificationCrewOrchestrator(document_text=document_text_string, resource_manager=resource_manager)
         report_dict = await asyncio.to_thread(resume_crew.run)
         if not report_dict:
             raise ValueError("Crew did not return a valid report.")
@@ -75,7 +81,21 @@ async def process_single_resume_detail(
         return f"Successfully processed resume {resume_dci_id}."
 
     except SalesforceAPIError as e:
-        if '500 Server Error' in str(e):
+        # Check if this is a missing document error (no ContentDocumentLink found)
+        if "Could not find any ContentDocumentLink" in str(e):
+            logger.warning(f"No document attached to resume DCI {resume_dci_id}, creating fallback AVS")
+            summary_record_id = await asyncio.to_thread(
+                sf_service.upsert_verification_summary,
+                application_id=parent_application_id,
+                report_content=None,
+                name_value="Resume Detail Analysis",
+                overall_feedback="No resume document was attached to this record.",
+                confidence_range="0",
+                mismatched_field_list=None
+            )
+            logger.info(f"Created fallback AVS for resume {resume_dci_id}. AVS ID: {summary_record_id}")
+            return f"Processed {readable_name} with no document fallback."
+        elif '500 Server Error' in str(e):
             reason = "Data provider failed. This is likely due to a missing document or invalid data on the Salesforce record. Please verify the record and its attachments."
             raise ValueError(_format_error(resume_dci_id, "Salesforce Data", reason, str(e)))
         else:

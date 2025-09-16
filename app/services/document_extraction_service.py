@@ -32,9 +32,9 @@ class DocumentExtractionError(Exception):
 
 # --- Optimized Gemini Processor ---
 class OptimizedGeminiProcessor:
-    """Single-pass Gemini processor for all OCR tasks"""
-    
-    def __init__(self):
+    """Single-pass Gemini processor for all OCR tasks with auto-cleanup"""
+
+    def __init__(self, resource_manager=None):
         self.llm = ChatGoogleGenerativeAI(
             model=MODEL_TEXT_EXTRACTION,
             google_api_key=DOC_GOOGLE_API_KEY,
@@ -42,7 +42,33 @@ class OptimizedGeminiProcessor:
             request_timeout=30.0,
             max_retries=2
         )
-        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix=f"ocr-{id(self)}")
+        self._shutdown = False
+        self.resource_manager = resource_manager
+
+        # Register with resource manager for guaranteed cleanup
+        if resource_manager:
+            resource_manager.track_executor(self.executor)
+            resource_manager.track_llm(self.llm)
+
+    def shutdown(self):
+        """Explicit shutdown method"""
+        if not self._shutdown:
+            try:
+                if hasattr(self, 'executor'):
+                    self.executor.shutdown(wait=True)
+                if hasattr(self, 'llm') and hasattr(self.llm, '_client'):
+                    # Clean up any persistent connections
+                    if hasattr(self.llm._client, 'close'):
+                        self.llm._client.close()
+                self._shutdown = True
+            except Exception as e:
+                logger.warning(f"Error during OCR processor shutdown: {e}")
+
+    def __del__(self):
+        """Fallback cleanup"""
+        if not self._shutdown:
+            self.shutdown()
     
     def process_document_single_pass(self, image_bytes: bytes, context: dict) -> str:
         """Single-pass OCR with built-in structuring - used for ALL content"""
@@ -142,13 +168,37 @@ class MuPDFHandler:
 
 # --- Main Document Extractor ---
 class FastDocumentExtractor:
-    def __init__(self):
+    def __init__(self, resource_manager=None):
+        self.resource_manager = resource_manager
         self.image_processor = FastImageProcessor()
-        self.ocr_processor = OptimizedGeminiProcessor()
+        self.ocr_processor = OptimizedGeminiProcessor(resource_manager=resource_manager)
         self.pdf_handler = MuPDFHandler({
             'dpi': 200,  # Good balance of quality and size
             'jpeg_quality': 85
         })
+        self._shutdown = False
+
+        # Register with resource manager
+        if resource_manager:
+            resource_manager.track_extractor(self)
+
+    def shutdown(self):
+        """Explicit cleanup of all resources"""
+        if not self._shutdown:
+            try:
+                if hasattr(self, 'ocr_processor'):
+                    self.ocr_processor.shutdown()
+                # Clear any cached data
+                if hasattr(self, '_cached_data'):
+                    delattr(self, '_cached_data')
+                self._shutdown = True
+            except Exception as e:
+                logger.warning(f"Error during document extractor shutdown: {e}")
+
+    def __del__(self):
+        """Fallback cleanup"""
+        if not self._shutdown:
+            self.shutdown()
 
     def _decode_base64(self, b64_data: str) -> bytes:
         """Decode base64 data"""
@@ -273,38 +323,42 @@ class FastDocumentExtractor:
                 raise
             raise DocumentExtractionError(f"An unexpected error occurred in extraction: {e}")
 
-# --- Dependency Injection ---
-_extractor_instance: Optional[FastDocumentExtractor] = None
+# --- Per-Job Instance Creation ---
+def create_text_extractor(resource_manager=None) -> FastDocumentExtractor:
+    """Create a new document extractor instance per job with resource tracking"""
+    try:
+        extractor = FastDocumentExtractor(resource_manager=resource_manager)
+        logger.info("FastDocumentExtractor created for job with resource management")
+        return extractor
+    except Exception as e:
+        logger.error(f"Failed to create FastDocumentExtractor: {e}", exc_info=True)
+        raise RuntimeError(f"FastDocumentExtractor creation failed: {e}")
 
 @asynccontextmanager
 async def lifespan(app):
-    """Application lifespan manager"""
-    global _extractor_instance
+    """Application lifespan manager - no global instance"""
     try:
-        if _extractor_instance is None:
-            _extractor_instance = FastDocumentExtractor()
-            logger.info("FastDocumentExtractor initialized.")
+        logger.info("Document extraction service ready for per-job instances")
         yield
     except Exception as e:
-        logger.critical(f"FastDocumentExtractor startup error: {e}", exc_info=True)
+        logger.critical(f"Document extraction service startup error: {e}", exc_info=True)
         raise
-    finally:
-        if _extractor_instance and hasattr(_extractor_instance.ocr_processor, 'executor'):
-            _extractor_instance.ocr_processor.executor.shutdown(wait=True)
-        logger.info("FastDocumentExtractor shutdown complete.")
 
-async def get_text_extractor() -> FastDocumentExtractor:
-    """Get the document extractor instance"""
-    if _extractor_instance is None:
-        raise RuntimeError("FastDocumentExtractor is not initialized.")
-    return _extractor_instance
-
-# --- Public API ---
-async def extract_text_from_file(file_base64_data: str, file_extension: str, record_id: str) -> str:
+# Update the public API function
+async def extract_text_from_file(
+    file_base64_data: str,
+    file_extension: str,
+    record_id: str,
+    extractor: FastDocumentExtractor = None,
+    resource_manager=None
+) -> str:
     """
-    Extract text from file using Gemini OCR for all content
+    Extract text from file using Gemini OCR with resource management
     - Images: Direct Gemini OCR
     - PDFs: Convert each page to image, then Gemini OCR
     """
-    extractor = await get_text_extractor()
-    return await extractor.extract_text_from_document(file_base64_data, file_extension, context_log_id=record_id)
+    if extractor is None:
+        extractor = create_text_extractor(resource_manager=resource_manager)
+    return await extractor.extract_text_from_document(
+        file_base64_data, file_extension, context_log_id=record_id
+    )

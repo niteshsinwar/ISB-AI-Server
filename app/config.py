@@ -118,11 +118,21 @@ RECENTLY_PROCESSED_TTL_SECONDS: int = int(os.getenv("RECENTLY_PROCESSED_TTL_SECO
 # This aligns the Python server with the business logic in the Apex handlers.
 RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
     {
+        "target_record_type": APPLICATION_OBJECT_API_NAME,
+        "retrieval_method": "self",
+        "lookup_on_child_to_parent": None,
+        "processor_module": "app.processors.application_processor",
+        "processor_function_name": "process_single_application_detail",
+        "priority": 1,
+        "filtering_criteria": None
+    },
+    {
         "target_record_type": EDUCATION_LOG_OBJECT_API_NAME,
         "retrieval_method": "direct",
         "lookup_on_child_to_parent": EDUCATION_LOG_FIELD_TO_PARENT_APP,
         "processor_module": "app.processors.education_processor",
         "processor_function_name": "process_single_education_history_detail",
+        "priority": 2,
         "filtering_criteria": {
             "field_api_name": "Education_History__r.Degree_Level__c",
             "allowed_values": [
@@ -137,6 +147,7 @@ RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
         "lookup_on_child_to_parent": EMPLOYMENT_LOG_FIELD_TO_PARENT_APP,
         "processor_module": "app.processors.employment_processor",
         "processor_function_name": "process_single_employment_detail",
+        "priority": 3,
         "order_by": "Affiliation__r.hed__StartDate__c DESC NULLS LAST",
         "limit": 1,
         "filtering_criteria": {
@@ -152,6 +163,7 @@ RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
         "lookup_on_child_to_parent": TEST_SCORE_LOOKUP_TO_PARENT_APP,
         "processor_module": "app.processors.test_score_processor",
         "processor_function_name": "process_single_test_score_detail",
+        "priority": 4,
         "filtering_criteria": {
             "field_api_name": "RecordTypeName__c",
             "allowed_values": ["GMAT_FOCUS", "GMAT", "GRE"]
@@ -163,6 +175,7 @@ RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
         "lookup_on_child_to_parent": DCI_PARENT_LOOKUP_FIELD,
         "processor_module": "app.processors.resume_processor",
         "processor_function_name": "process_single_resume_detail",
+        "priority": 5,
         "filtering_criteria": [
     {
         "field_api_name": "Name",

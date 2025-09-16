@@ -28,7 +28,10 @@ async def process_single_application_detail(
     sf_service: "SalesforceService",
     application_id: str,
     parent_application_id: str,
-    application_object_api_name: str 
+    application_object_api_name: str,
+    item_index: Optional[int] = None,
+    extractor_instance: "FastDocumentExtractor" = None,
+    resource_manager=None
 ) -> str:
     """
     Processes the main Application record (Personal Detail) and its associated ID document.
@@ -36,8 +39,12 @@ async def process_single_application_detail(
     readable_name = READABLE_OBJECT_NAMES.get(application_object_api_name, "Application")
     logger.info(f"Starting {readable_name} processing for ID: {application_id}")
 
-    from app.services.document_extraction_service import extract_text_from_file
+    from app.services.document_extraction_service import extract_text_from_file, create_text_extractor
     from app.crew.application_crew import ApplicationVerificationCrewOrchestrator
+
+    # Use provided extractor or create a per-job extractor with resource tracking
+    if extractor_instance is None:
+        extractor_instance = create_text_extractor(resource_manager=resource_manager)
 
     try:
         details = await asyncio.to_thread(
@@ -47,7 +54,26 @@ async def process_single_application_detail(
         
         record_data = details.get("recordData", {})
         document_payload = details.get("documentPayload")
+        salesforce_data_issue = details.get("Salesforce_data_issue_Summary")
         contact_id = record_data.get(APPLICATION_CONTACT_LOOKUP_FIELD_ON_APP)
+
+        # Check for graceful fallback scenario (from top level or record data)
+        fallback_summary = salesforce_data_issue or record_data.get("Salesforce_data_issue_Summary")
+        if fallback_summary:
+            logger.warning(f"Salesforce data issue detected for {application_id}: {fallback_summary}")
+            summary_name = "Personal Detail Analysis"
+            summary_record_id = await asyncio.to_thread(
+                sf_service.upsert_verification_summary,
+                application_id=parent_application_id,
+                report_content=None,
+                name_value=summary_name,
+                overall_feedback=fallback_summary,
+                confidence_range="0",
+                mismatched_field_list=None,
+                contact_id=contact_id
+            )
+            logger.info(f"Created fallback AVS for {readable_name} {application_id}. AVS ID: {summary_record_id}")
+            return f"Processed {readable_name} with data issue fallback."
 
         if not document_payload:
             raise ValueError("Document payload was missing from the Salesforce record.")
@@ -58,10 +84,10 @@ async def process_single_application_detail(
         file_extension = document_payload.get("fileExtension")
         if not base64_data or not file_extension:
             raise ValueError("Document content (base64) or file extension missing.")
-        
-        document_text_string = await extract_text_from_file(base64_data, file_extension, record_id=application_id)
 
-        app_crew = ApplicationVerificationCrewOrchestrator(record_data, document_text_string)
+        document_text_string = await extract_text_from_file(base64_data, file_extension, record_id=application_id, extractor=extractor_instance, resource_manager=resource_manager)
+
+        app_crew = ApplicationVerificationCrewOrchestrator(record_data, document_text_string, resource_manager=resource_manager)
         report_dict = await asyncio.to_thread(app_crew.run)
         if not report_dict:
             raise ValueError("Crew did not return a valid report.")

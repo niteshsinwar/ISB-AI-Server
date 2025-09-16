@@ -37,33 +37,26 @@ class ValidatedCrewReport(BaseModel):
 FIELDS_TO_EXCLUDE_FROM_PROCESSING: List[str] = [
      'Applicant__c', 'type', 'Contact', 'recordId', 'Task_Id','triggeringLogId','Id','Test_Mode', 'DocumentchecklistItem_Id']
 
-# LLM Initialization
-llm_comparator = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, CREW_GOOGLE_API_KEY)
-llm_reporter = initialize_llm(MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS, CREW_GOOGLE_API_KEY)
-
-if llm_comparator and llm_reporter:
-    logger.info("TestScoreCrew LLMs initialized.")
-else:
-    logger.critical("Failed to initialize one or more LLMs for TestScoreCrew.")
+# NOTE: Per-job LLM instances will be created inside the Orchestrator to avoid global state.
 
 class TestScoreVerificationAgents:
-    def data_comparator_agent(self):
+    def data_comparator_agent(self, llm_instance):
         return Agent(
             role='Data Comparator',
             goal=TEST_SCORE_DATA_COMPARATOR_AGENT_GOAL,
             backstory=TEST_SCORE_DATA_COMPARATOR_AGENT_BACKSTORY,
-            llm=llm_comparator,
+            llm=llm_instance,
             verbose=True,
             allow_delegation=False,
             max_iter=5
         )
 
-    def final_report_generator_agent(self):
+    def final_report_generator_agent(self, llm_instance):
         return Agent(
             role='Final Report Generator',
             goal=FINAL_REPORT_GENERATOR_AGENT_GOAL,
             backstory=FINAL_REPORT_GENERATOR_AGENT_BACKSTORY,
-            llm=llm_reporter,
+            llm=llm_instance,
             verbose=True,
             allow_delegation=False,
             max_iter=3
@@ -89,13 +82,19 @@ class TestScoreVerificationTasks:
         )
 
 class TestScoreVerificationCrewOrchestrator:
-    def __init__(self, record_data: Dict[str, Any], document_text: str):
+    def __init__(self, record_data: Dict[str, Any], document_text: str, resource_manager=None):
         self.record_data = record_data
         self.document_text = document_text
+        self.resource_manager = resource_manager
+        # Create isolated LLM instances for this job with resource tracking
+        self.llm_comparator = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, CREW_GOOGLE_API_KEY, resource_manager)
+        self.llm_reporter = initialize_llm(MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS, CREW_GOOGLE_API_KEY, resource_manager)
+        if not self.llm_comparator or not self.llm_reporter:
+            raise RuntimeError("Failed to initialize LLMs for TestScoreCrew")
 
     @CrewErrorHandler()
     def run(self) -> Dict[str, Any]:
-        if not llm_comparator or not llm_reporter:
+        if not self.llm_comparator or not self.llm_reporter:
             raise RuntimeError("LLMs for TestScoreCrew are not initialized. Cannot run.")
             
         verifiable_apex_field_names = [
@@ -104,8 +103,8 @@ class TestScoreVerificationCrewOrchestrator:
         agents = TestScoreVerificationAgents()
         tasks = TestScoreVerificationTasks()
 
-        comparator_agent = agents.data_comparator_agent()
-        report_agent = agents.final_report_generator_agent()
+        comparator_agent = agents.data_comparator_agent(self.llm_comparator)
+        report_agent = agents.final_report_generator_agent(self.llm_reporter)
 
         compare_task = tasks.compare_data_task(
             comparator_agent, self.document_text, self.record_data, verifiable_apex_field_names

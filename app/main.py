@@ -30,7 +30,7 @@ async def lifespan(app_lifespan: FastAPI):
     async with text_extractor_lifespan(app_lifespan):
         logger.info("Text extractor initialized via application lifespan.")
         yield
-    
+
     logger.info("Application lifespan shutdown.")
 
 app = FastAPI(
