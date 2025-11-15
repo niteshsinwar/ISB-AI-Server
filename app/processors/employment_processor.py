@@ -28,7 +28,6 @@ async def process_single_employment_detail(
     parent_application_id: str,
     item_index: Optional[int] = None,
     extractor_instance: "FastDocumentExtractor" = None,
-    resource_manager=None
 ):
     readable_name = READABLE_OBJECT_NAMES.get(EMPLOYMENT_LOG_OBJECT_API_NAME, "Employment Record")
     logger.info(f"Starting {readable_name} processing for Log ID: {employment_log_id}")
@@ -38,7 +37,7 @@ async def process_single_employment_detail(
 
     # Use provided extractor or create a per-job extractor
     if extractor_instance is None:
-        extractor_instance = create_text_extractor(resource_manager=resource_manager)
+        extractor_instance = create_text_extractor()
 
     try:
         details = await asyncio.to_thread(
@@ -78,9 +77,9 @@ async def process_single_employment_detail(
         if not base64_data or not file_extension:
             raise ValueError("Document content (base64) or file extension missing.")
 
-        document_text_string = await extract_text_from_file(base64_data, file_extension, record_id=employment_log_id, extractor=extractor_instance, resource_manager=resource_manager)
+        document_text_string = await extract_text_from_file(base64_data, file_extension, record_id=employment_log_id, extractor=extractor_instance)
 
-        emp_crew = EmploymentVerificationCrewOrchestrator(record_data, document_text_string, resource_manager=resource_manager)
+        emp_crew = EmploymentVerificationCrewOrchestrator(record_data, document_text_string)
         report_dict = await asyncio.to_thread(emp_crew.run)
         if not report_dict:
             raise ValueError("Crew did not return a valid report.")

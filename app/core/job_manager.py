@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.services.salesforce_service import SalesforceService
 from .rate_limit_state import acquire_processing_slot, release_processing_slot, get_active_processing_slots_count
+from .process_manager import get_process_manager
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,7 @@ class Job(BaseModel):
     job_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     salesforce_job_record_id: Optional[str] = None
     application_id: str
+    org_alias: Optional[str] = None
     status: str = "queued"
     message: Optional[str] = "Waiting for available slot."
     client_fingerprint: str
@@ -31,11 +33,17 @@ class JobManager:
         self._lock = asyncio.Lock()
 
     async def create_job(self, application_id: str, client_fingerprint: str, sf_service: SalesforceService) -> Job:
+        stale_job_id: Optional[str] = None
+
+        org_alias = getattr(sf_service, "org_alias", None)
+
         async with self._lock:
             if application_id in self._active_jobs:
-                self._active_jobs[application_id].is_stale = True
+                stale_job = self._active_jobs[application_id]
+                stale_job.is_stale = True
+                stale_job_id = stale_job.job_id
             
-            new_job = Job(application_id=application_id, client_fingerprint=client_fingerprint)
+            new_job = Job(application_id=application_id, client_fingerprint=client_fingerprint, org_alias=org_alias)
             
             sf_job_id = await sf_service.upsert_ai_server_job(
                 job_id=new_job.job_id,
@@ -48,8 +56,14 @@ class JobManager:
             
             new_job.salesforce_job_record_id = sf_job_id
             self._active_jobs[application_id] = new_job
-            logger.info(f"Created job {new_job.job_id} for App {application_id} in org {sf_service.instance_url}")
-            return new_job
+
+        if stale_job_id:
+            process_manager = await get_process_manager()
+            await process_manager.kill_job_worker(stale_job_id)
+            logger.info(f"Marked stale and terminated previous job {stale_job_id} for App {application_id}")
+
+        logger.info(f"Created job {new_job.job_id} for App {application_id} in org {sf_service.instance_url}")
+        return new_job
 
     async def begin_processing(self, job: Job, sf_service: SalesforceService):
         await acquire_processing_slot()
@@ -95,19 +109,31 @@ class JobManager:
 
     async def get_job_status(self, application_id: str, sf_service: SalesforceService) -> Optional[Dict[str, Any]]:
         async with self._lock:
-            if active_job := self._active_jobs.get(application_id):
-                return active_job.model_dump()
+            active_job = self._active_jobs.get(application_id)
+
+        if active_job:
+            sf_status = await sf_service.get_latest_ai_server_job(application_id)
+            if sf_status:
+                return sf_status
+            return active_job.model_dump()
         
         logger.info(f"No active job for App {application_id} in memory. Querying Salesforce org {sf_service.instance_url}.")
         return await sf_service.get_latest_ai_server_job(application_id)
 
-    async def get_queue_overview(self) -> Dict[str, Any]:
+    async def get_queue_overview(self, org_alias: Optional[str] = None) -> Dict[str, Any]:
         async with self._lock:
-            jobs = [job.model_dump() for job in self._active_jobs.values()]
+            job_dicts = [
+                job.model_dump()
+                for job in self._active_jobs.values()
+                if org_alias is None or job.org_alias == org_alias
+            ]
+
+        job_dicts.sort(key=lambda x: x['last_updated_at'], reverse=True)
+
         return {
             "active_jobs": await get_active_processing_slots_count(),
-            "tracked_jobs_total": len(jobs),
-            "all_jobs": sorted(jobs, key=lambda x: x['last_updated_at'], reverse=True)
+            "tracked_jobs_total": len(job_dicts),
+            "all_jobs": job_dicts
         }
 
     async def is_job_active(self, application_id: str) -> bool:
@@ -119,22 +145,24 @@ class JobManager:
             job = self._active_jobs.get(application_id)
             if not job:
                 return False, None
-            
+            job.is_stale = True
             original_status = job.model_dump()
-            logger.warning(f"Admin clearing job {job.job_id} for App {application_id} in org {sf_service.instance_url}")
-            
-            await sf_service.upsert_ai_server_job(
-                job_id=job.job_id,
-                application_id=job.application_id,
-                status="failed",
-                message="Manually cleared by admin."
-            )
-            
-            if job.status == "processing":
-                await release_processing_slot()
-                
-            del self._active_jobs[application_id]
-            return True, original_status
+
+        logger.warning(f"Admin clearing job {job.job_id} for App {application_id} in org {sf_service.instance_url}")
+        await sf_service.upsert_ai_server_job(
+            job_id=job.job_id,
+            application_id=job.application_id,
+            status="failed",
+            message="Manually cleared by admin."
+        )
+
+        process_manager = await get_process_manager()
+        await process_manager.kill_job_worker(job.job_id)
+
+        async with self._lock:
+            self._active_jobs.pop(application_id, None)
+
+        return True, original_status
 
 _job_manager_instance: Optional[JobManager] = None
 _job_manager_lock = asyncio.Lock()

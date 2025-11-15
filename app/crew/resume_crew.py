@@ -44,11 +44,9 @@ class ResumeVerificationTasks:
         )
 
 class ResumeVerificationCrewOrchestrator:
-    def __init__(self, document_text: str, resource_manager=None):
+    def __init__(self, document_text: str):
         self.document_text = document_text
-        self.resource_manager = resource_manager
-        # Create isolated LLM instance for this job with resource tracking
-        self.llm_screener = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, CREW_GOOGLE_API_KEY, resource_manager)
+        self.llm_screener = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, CREW_GOOGLE_API_KEY)
         if not self.llm_screener:
             raise RuntimeError("Failed to initialize LLM for ResumeCrew")
 

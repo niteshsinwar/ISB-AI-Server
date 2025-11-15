@@ -32,9 +32,9 @@ class DocumentExtractionError(Exception):
 
 # --- Optimized Gemini Processor ---
 class OptimizedGeminiProcessor:
-    """Single-pass Gemini processor for all OCR tasks with auto-cleanup"""
+    """Single-pass Gemini processor for all OCR tasks."""
 
-    def __init__(self, resource_manager=None):
+    def __init__(self):
         self.llm = ChatGoogleGenerativeAI(
             model=MODEL_TEXT_EXTRACTION,
             google_api_key=DOC_GOOGLE_API_KEY,
@@ -44,12 +44,6 @@ class OptimizedGeminiProcessor:
         )
         self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix=f"ocr-{id(self)}")
         self._shutdown = False
-        self.resource_manager = resource_manager
-
-        # Register with resource manager for guaranteed cleanup
-        if resource_manager:
-            resource_manager.track_executor(self.executor)
-            resource_manager.track_llm(self.llm)
 
     def shutdown(self):
         """Explicit shutdown method"""
@@ -168,19 +162,14 @@ class MuPDFHandler:
 
 # --- Main Document Extractor ---
 class FastDocumentExtractor:
-    def __init__(self, resource_manager=None):
-        self.resource_manager = resource_manager
+    def __init__(self):
         self.image_processor = FastImageProcessor()
-        self.ocr_processor = OptimizedGeminiProcessor(resource_manager=resource_manager)
+        self.ocr_processor = OptimizedGeminiProcessor()
         self.pdf_handler = MuPDFHandler({
             'dpi': 200,  # Good balance of quality and size
             'jpeg_quality': 85
         })
         self._shutdown = False
-
-        # Register with resource manager
-        if resource_manager:
-            resource_manager.track_extractor(self)
 
     def shutdown(self):
         """Explicit cleanup of all resources"""
@@ -324,11 +313,11 @@ class FastDocumentExtractor:
             raise DocumentExtractionError(f"An unexpected error occurred in extraction: {e}")
 
 # --- Per-Job Instance Creation ---
-def create_text_extractor(resource_manager=None) -> FastDocumentExtractor:
-    """Create a new document extractor instance per job with resource tracking"""
+def create_text_extractor() -> FastDocumentExtractor:
+    """Create a new document extractor instance per job."""
     try:
-        extractor = FastDocumentExtractor(resource_manager=resource_manager)
-        logger.info("FastDocumentExtractor created for job with resource management")
+        extractor = FastDocumentExtractor()
+        logger.info("FastDocumentExtractor created for job")
         return extractor
     except Exception as e:
         logger.error(f"Failed to create FastDocumentExtractor: {e}", exc_info=True)
@@ -350,15 +339,14 @@ async def extract_text_from_file(
     file_extension: str,
     record_id: str,
     extractor: FastDocumentExtractor = None,
-    resource_manager=None
 ) -> str:
     """
-    Extract text from file using Gemini OCR with resource management
+    Extract text from file using Gemini OCR.
     - Images: Direct Gemini OCR
     - PDFs: Convert each page to image, then Gemini OCR
     """
     if extractor is None:
-        extractor = create_text_extractor(resource_manager=resource_manager)
+        extractor = create_text_extractor()
     return await extractor.extract_text_from_document(
         file_base64_data, file_extension, context_log_id=record_id
     )

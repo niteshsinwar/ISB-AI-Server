@@ -40,10 +40,11 @@ class SalesforceAPIError(Exception):
 
 class SalesforceService:
     """A class to represent a connection to a single Salesforce org."""
-    def __init__(self, client_id: str, client_secret: str, token_url: str):
+    def __init__(self, client_id: str, client_secret: str, token_url: str, org_alias: Optional[str] = None):
         self.client_id = client_id
         self.client_secret = client_secret
         self.token_url = token_url
+        self.org_alias = org_alias
         self.sf: Optional[Salesforce] = None
         self.instance_url: Optional[str] = None
         self.apex_endpoint_path_map: Dict[str, str] = APEX_ENDPOINT_PATHS
@@ -415,12 +416,15 @@ class SalesforceConnectionManager:
                     service = SalesforceService(
                         client_id=org_config['client_id'],
                         client_secret=org_config['client_secret'],
-                        token_url=org_config['token_url']
+                        token_url=org_config['token_url'],
+                        org_alias=org_alias
                     )
                     self._services[org_alias] = service
                 except Exception as e:
                     raise HTTPException(status_code=503, detail=f"SF Service for '{org_alias}' unavailable: {e}")
-            return self._services[org_alias]
+            service = self._services[org_alias]
+            service.org_alias = org_alias
+            return service
 
 _sf_connection_manager = SalesforceConnectionManager()
 

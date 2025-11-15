@@ -82,13 +82,11 @@ class EmploymentVerificationTasks:
         )
 
 class EmploymentVerificationCrewOrchestrator:
-    def __init__(self, record_data: Dict[str, Any], document_text: str, resource_manager=None):
+    def __init__(self, record_data: Dict[str, Any], document_text: str):
         self.record_data = record_data
         self.document_text = document_text
-        self.resource_manager = resource_manager
-        # Create isolated LLM instances for this job with resource tracking
-        self.llm_comparator = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, CREW_GOOGLE_API_KEY, resource_manager)
-        self.llm_reporter = initialize_llm(MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS, CREW_GOOGLE_API_KEY, resource_manager)
+        self.llm_comparator = initialize_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION, CREW_GOOGLE_API_KEY)
+        self.llm_reporter = initialize_llm(MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS, CREW_GOOGLE_API_KEY)
         if not self.llm_comparator or not self.llm_reporter:
             raise RuntimeError("Failed to initialize LLMs for EmploymentCrew")
 

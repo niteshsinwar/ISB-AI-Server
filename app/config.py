@@ -8,7 +8,7 @@ load_dotenv()
 # --- Application Metadata ---
 APP_TITLE: str = "Salesforce Document Text Extraction and Application Analysis API"
 APP_DESCRIPTION: str = "API for extracting information from document text and analyzing Salesforce application records."
-APP_VERSION: str = "1.3.0" # Version updated to reflect pre-filtering logic
+APP_VERSION: str = "2.0.0" # Production-grade architecture with process isolation, best-in-class observability, and fault tolerance
 
 # --- Logging Configuration ---
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -103,6 +103,7 @@ CONFIDENCE_PICKLIST_RANGES: List[str] = [ '100', '90 to 99', '80 to 90', '40 to 
 # --- API Rate Limiting and Processing Configuration ---
 MAX_CONCURRENT_PROCESSING_SLOTS: int = int(os.getenv("MAX_CONCURRENT_PROCESSING_SLOTS", "15"))
 ACTIVE_PROCESSING_TIMEOUT_SECONDS: int = int(os.getenv("ACTIVE_PROCESSING_TIMEOUT_SECONDS", "360"))
+JOB_TIMEOUT_SECONDS: int = int(os.getenv("JOB_TIMEOUT_SECONDS", "2000"))
 MAX_CLIENT_REQUESTS_PER_WINDOW: int = int(os.getenv("MAX_CLIENT_REQUESTS_PER_WINDOW", "30"))
 SUSPICIOUS_THRESHOLD_REQUESTS: int = int(os.getenv("SUSPICIOUS_THRESHOLD_REQUESTS", "40"))
 MAX_GLOBAL_REQUESTS_PER_WINDOW: int = int(os.getenv("MAX_GLOBAL_REQUESTS_PER_WINDOW", "60"))

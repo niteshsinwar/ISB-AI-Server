@@ -23,7 +23,6 @@ async def process_single_resume_detail(
     resume_dci_id: str,
     parent_application_id: str,
     extractor_instance: "FastDocumentExtractor" = None,
-    resource_manager=None,
     **kwargs
 ) -> str:
     readable_name = READABLE_OBJECT_NAMES.get(DCI_OBJECT_API_NAME, "Resume Detail")
@@ -34,7 +33,7 @@ async def process_single_resume_detail(
 
     # Use provided extractor or create a per-job extractor
     if extractor_instance is None:
-        extractor_instance = create_text_extractor(resource_manager=resource_manager)
+        extractor_instance = create_text_extractor()
 
     try:
         details = await asyncio.to_thread(sf_service.get_dci_document_data, resume_dci_id)
@@ -49,9 +48,9 @@ async def process_single_resume_detail(
         if not base64_data or not file_extension:
             raise ValueError("Document content (base64) or file extension missing.")
 
-        document_text_string = await extract_text_from_file(base64_data, file_extension, record_id=resume_dci_id, extractor=extractor_instance, resource_manager=resource_manager)
+        document_text_string = await extract_text_from_file(base64_data, file_extension, record_id=resume_dci_id, extractor=extractor_instance)
 
-        resume_crew = ResumeVerificationCrewOrchestrator(document_text=document_text_string, resource_manager=resource_manager)
+        resume_crew = ResumeVerificationCrewOrchestrator(document_text=document_text_string)
         report_dict = await asyncio.to_thread(resume_crew.run)
         if not report_dict:
             raise ValueError("Crew did not return a valid report.")
