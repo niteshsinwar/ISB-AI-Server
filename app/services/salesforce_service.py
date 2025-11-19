@@ -85,24 +85,34 @@ class SalesforceService:
     def _call_sf_api_with_retry(self, api_call_func: Callable, *args, **kwargs) -> Any:
         """
         Calls a Salesforce API function with a robust retry mechanism.
-        If any error occurs, it forces a reconnection and retries the call once.
+        Only reconnects on session expiry to avoid wasting OAuth tokens.
+
+        CRITICAL: api_call_func should be a lambda that accesses self.sf at call time,
+        not a bound method captured at closure creation time.
         """
         try:
             self._ensure_connected()
+            # If api_call_func is a lambda, it will access current self.sf
             return api_call_func(*args, **kwargs)
-        except Exception as e:
-            # Catch any exception on the first attempt.
+        except SalesforceExpiredSession as e:
+            # Session expired - reconnect is appropriate
             logger.warning(
-                f"An operation failed with error: {type(e).__name__}. "
-                f"Attempting a forced reconnect and retrying the operation once."
+                f"Session expired for {self.instance_url}. "
+                f"Reconnecting and retrying once."
             )
-            
-            # Force a new connection session.
+
+            # Force a new connection session
             self._connect()
-            
-            # Retry the call. If this second attempt fails, the exception will
-            # be raised, as requested.
+
+            # CRITICAL: Since we reconnected, self.sf is now a NEW object.
+            # If api_call_func is a lambda like: lambda: self.sf.query(soql)
+            # it will use the NEW self.sf when called here.
             return api_call_func(*args, **kwargs)
+        except (SalesforceMalformedRequest, SalesforceResourceNotFound) as e:
+            # Client errors - don't retry, these won't be fixed by reconnecting
+            logger.error(f"Salesforce client error: {type(e).__name__}: {e}")
+            raise
+        # Let other exceptions bubble up without retry
 
     def get_record_detail_from_apex(self, record_id: str, sobject_api_name_key: str) -> Dict[str, Any]:
         if not (isinstance(record_id, str) and (len(record_id) == 15 or len(record_id) == 18)):
@@ -138,8 +148,9 @@ class SalesforceService:
         self._ensure_connected()
         soql = f"SELECT Id FROM {AI_SERVER_JOB_OBJECT_API_NAME} WHERE {AIJ_APPLICATION_LOOKUP_FIELD} = '{application_id}' LIMIT 1"
         def do_query():
-            return self._call_sf_api_with_retry(self.sf.query, soql)
-        
+            # Use lambda to access self.sf at call time, not closure creation time
+            return self._call_sf_api_with_retry(lambda: self.sf.query(soql))
+
         try:
             result = await asyncio.get_event_loop().run_in_executor(None, do_query)
         except Exception as e:
@@ -163,14 +174,14 @@ class SalesforceService:
                 update_payload = payload.copy()
                 del update_payload[AIJ_APPLICATION_LOOKUP_FIELD]
                 def do_update():
-                    return self._call_sf_api_with_retry(handler.update, existing_id, update_payload)
+                    return self._call_sf_api_with_retry(lambda: handler.update(existing_id, update_payload))
                 response = await asyncio.get_event_loop().run_in_executor(None, do_update)
                 if response != 204:
                     raise SalesforceAPIError(f"Failed to update AI Server Job record. Status: {response}")
                 return existing_id
             else:
                 def do_create():
-                    return self._call_sf_api_with_retry(handler.create, payload)
+                    return self._call_sf_api_with_retry(lambda: handler.create(payload))
                 response = await asyncio.get_event_loop().run_in_executor(None, do_create)
                 if not (isinstance(response, dict) and response.get('success')):
                     raise SalesforceAPIError(f"Failed to create AI Server Job record. Response: {response}")
@@ -182,7 +193,7 @@ class SalesforceService:
     async def get_latest_ai_server_job(self, application_id: str) -> Optional[Dict[str, Any]]:
         self._ensure_connected()
         soql = f"SELECT Id, {AIJ_JOB_ID_FIELD}, {AIJ_STATUS_FIELD}, {AIJ_MESSAGE_FIELD}, CreatedDate, LastModifiedDate, {AIJ_PROGRESS_FIELD}, {AIJ_CLIENT_FP_FIELD} FROM {AI_SERVER_JOB_OBJECT_API_NAME} WHERE {AIJ_APPLICATION_LOOKUP_FIELD} = '{application_id}' ORDER BY CreatedDate DESC LIMIT 1"
-        def do_query(): return self._call_sf_api_with_retry(self.sf.query, soql)
+        def do_query(): return self._call_sf_api_with_retry(lambda: self.sf.query(soql))
         try:
             result = await asyncio.get_event_loop().run_in_executor(None, do_query)
             if result['totalSize'] > 0:
@@ -223,19 +234,19 @@ class SalesforceService:
 
         try:
             handler = getattr(self.sf, summary_obj_name)
-            result = self._call_sf_api_with_retry(self.sf.query, soql)
-            
+            result = self._call_sf_api_with_retry(lambda: self.sf.query(soql))
+
             if result.get('totalSize', 0) > 0:
                 existing_id = result['records'][0]['Id']
                 update_payload = payload.copy()
                 update_payload.pop(AVS_APPLICATION_LOOKUP_FIELD, None)
-                status = self._call_sf_api_with_retry(handler.update, existing_id, update_payload)
+                status = self._call_sf_api_with_retry(lambda: handler.update(existing_id, update_payload))
                 if status != 204:
                     raise SalesforceAPIError(f"Failed to update verification summary. Status: {status}")
                 return existing_id
             else:
                 if secondary_field and secondary_id: payload[secondary_field] = secondary_id
-                res = self._call_sf_api_with_retry(handler.create, payload)
+                res = self._call_sf_api_with_retry(lambda: handler.create(payload))
                 if not (isinstance(res, dict) and res.get('success')):
                     raise SalesforceAPIError(f"Failed to create verification summary. Response: {res}")
                 return res.get('id')
@@ -249,7 +260,7 @@ class SalesforceService:
         if dci_id:
             try:
                 handler = getattr(self.sf, 'DocumentChecklistItem')
-                self._call_sf_api_with_retry(handler.update, dci_id, {AVS_TASK_DCI_LOOKUP_FIELD: summary_id})
+                self._call_sf_api_with_retry(lambda: handler.update(dci_id, {AVS_TASK_DCI_LOOKUP_FIELD: summary_id}))
                 logger.info(f"Successfully linked Summary {summary_id} to DCI {dci_id}.")
             except Exception as e: 
                 logger.error(f"Failed to update DocumentChecklistItem {dci_id}: {e}")
@@ -320,8 +331,8 @@ class SalesforceService:
 
         logger.info(f"Executing filtered query for related records: {soql}")
         try:
-            # Assuming _call_sf_api_with_retry and self.sf.query_all are defined
-            result = self._call_sf_api_with_retry(self.sf.query_all, soql)
+            # Use lambda to access self.sf at call time
+            result = self._call_sf_api_with_retry(lambda: self.sf.query_all(soql))
             return [rec['Id'] for rec in result['records']]
         except Exception as e:
             logger.error(f"Error getting related record IDs with query '{soql}': {e}", exc_info=True)
@@ -334,7 +345,7 @@ class SalesforceService:
         soql = f"SELECT {APPLICATION_CONTACT_LOOKUP_FIELD_ON_APP} FROM {APPLICATION_OBJECT_API_NAME} WHERE Id = '{application_id}' LIMIT 1"
         try:
             def do_query():
-                return self._call_sf_api_with_retry(self.sf.query, soql)
+                return self._call_sf_api_with_retry(lambda: self.sf.query(soql))
             result = await asyncio.get_event_loop().run_in_executor(None, do_query)
             if result.get('totalSize', 0) > 0:
                 contact_id = result['records'][0].get(APPLICATION_CONTACT_LOOKUP_FIELD_ON_APP)
@@ -357,7 +368,7 @@ class SalesforceService:
         for attempt in range(max_retries):
             try:
                 soql_link = f"SELECT ContentDocument.LatestPublishedVersionId FROM ContentDocumentLink WHERE LinkedEntityId = '{dci_id}' ORDER BY SystemModstamp DESC LIMIT 1"
-                result_link = self._call_sf_api_with_retry(self.sf.query, soql_link)
+                result_link = self._call_sf_api_with_retry(lambda: self.sf.query(soql_link))
                 if result_link.get('totalSize', 0) > 0:
                     content_version_id = result_link['records'][0]['ContentDocument']['LatestPublishedVersionId']
                     logger.info(f"Found ContentVersion ID '{content_version_id}' for DCI {dci_id} on attempt {attempt + 1}.")
@@ -373,7 +384,7 @@ class SalesforceService:
         
         try:
             handler = getattr(self.sf, 'ContentVersion')
-            version_record = self._call_sf_api_with_retry(handler.get, content_version_id)
+            version_record = self._call_sf_api_with_retry(lambda: handler.get(content_version_id))
             version_data_url = version_record.get('VersionData')
             if not version_data_url:
                 raise SalesforceAPIError(f"Found ContentVersion {content_version_id}, but it has no 'VersionData' URL.")
