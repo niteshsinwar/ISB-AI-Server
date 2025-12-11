@@ -185,11 +185,17 @@ RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
             "field": "ParentRecordId",
             "operator": "NOT IN",
             "subquery": {
-                "object": "hed__Application__c", 
+                "object": "hed__Application__c",
                 "select_field": "Id",
                 "where_clause": "ApplyingTo__c LIKE '%AMP%'"
             }
         }
+    },
+    {
+        # Exclude records where Status is already 'Accepted'
+        "field_api_name": "Status",
+        "operator": "!=",
+        "value": "Accepted"
     }
 ]
     }
