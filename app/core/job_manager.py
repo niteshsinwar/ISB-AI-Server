@@ -140,6 +140,15 @@ class JobManager:
         async with self._lock:
             return application_id in self._active_jobs and not self._active_jobs[application_id].is_stale
 
+    async def get_all_active_jobs(self) -> Dict[str, Job]:
+        """Returns a copy of all active jobs (non-stale only)."""
+        async with self._lock:
+            return {
+                app_id: job
+                for app_id, job in self._active_jobs.items()
+                if not job.is_stale
+            }
+
     async def admin_clear_job(self, application_id: str, sf_service: SalesforceService) -> tuple[bool, Optional[Dict[str, Any]]]:
         async with self._lock:
             job = self._active_jobs.get(application_id)

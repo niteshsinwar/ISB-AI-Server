@@ -14,13 +14,7 @@ from app.config import (
     MAX_CONCURRENT_PROCESSING_SLOTS,
     READABLE_OBJECT_NAMES
 )
-from app.core.rate_limit_state import (
-    generate_client_fingerprint,
-    is_client_blocked,
-    check_rapid_fire_protection,
-    check_and_update_client_rate_limit,
-    check_and_update_global_rate_limit
-)
+from app.core.rate_limit_state import generate_client_fingerprint
 from app.core.job_manager import Job, JobManager, get_job_manager_dependency
 from app.core.process_manager import get_process_manager, WorkerProcessError
 from app.schemas.responses import (
@@ -191,16 +185,18 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
         if not (isinstance(app_id, str) and len(app_id) in [15, 18]):
             raise HTTPException(status_code=400, detail="Invalid Salesforce record_id format.")
 
-        if block_message := await is_client_blocked(client_fp):
-            raise HTTPException(status_code=429, detail=block_message)
+        # Check 1: Duplicate job protection - O(1), prevents same app being processed twice
         if await job_manager.is_job_active(app_id):
             raise HTTPException(status_code=409, detail=f"A job for Application ID {app_id} is already active.")
-        ok, msg = await check_rapid_fire_protection(client_fp, app_id)
-        if not ok: raise HTTPException(status_code=429, detail=msg)
-        ok, msg = await check_and_update_client_rate_limit(client_fp)
-        if not ok: raise HTTPException(status_code=429, detail=msg)
-        ok, msg = await check_and_update_global_rate_limit()
-        if not ok: raise HTTPException(status_code=429, detail=msg)
+
+        # Check 2: Queue capacity - O(n), prevents unbounded queue growth (allows batch processing)
+        all_jobs = await job_manager.get_all_active_jobs()
+        queued_count = sum(1 for j in all_jobs.values() if j.status == "queued")
+        if queued_count >= MAX_CONCURRENT_PROCESSING_SLOTS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Queue full: {queued_count}/{MAX_CONCURRENT_PROCESSING_SLOTS} jobs waiting. Please try again later."
+            )
             
         try:
             new_job = await job_manager.create_job(app_id, client_fp, sf_service=sf_service)
