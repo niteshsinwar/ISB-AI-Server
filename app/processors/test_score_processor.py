@@ -8,6 +8,7 @@ from app.config import (
     MAX_SALESFORCE_REPORT_LENGTH,
     READABLE_OBJECT_NAMES
 )
+from app.core.processing_utils import should_skip_processing
 from app.services.document_extraction_service import DocumentExtractionError
 from app.services.salesforce_service import SalesforceAPIError
 
@@ -45,7 +46,23 @@ async def process_single_test_score_detail(
         )
         
         record_data = details.get("recordData", {})
+        document_payload = details.get("documentPayload")
         salesforce_data_issue = details.get("Salesforce_data_issue_Summary")
+
+        # Cost optimization: Check if record should be skipped (100% verified, no changes)
+        existing_avs = await asyncio.to_thread(
+            sf_service.get_existing_avs_metadata,
+            application_id=parent_application_id,
+            test_id=test_score_id
+        )
+        skip, reason = should_skip_processing(
+            existing_avs=existing_avs,
+            record_last_modified=record_data.get("LastModifiedDate"),
+            document_last_modified=document_payload.get("LastModifiedDate") if document_payload else None
+        )
+        if skip:
+            logger.info(f"Skipping {readable_name} {test_score_id}: {reason}")
+            return f"Skipped {readable_name} - already 100% verified with no changes."
 
         # **CHECK FOR GRACEFUL FALLBACK SCENARIO FIRST** (from top level or record data)
         fallback_summary = salesforce_data_issue or record_data.get("Salesforce_data_issue_Summary")
@@ -86,10 +103,8 @@ async def process_single_test_score_detail(
             
             logger.info(f"Successfully processed Online {readable_name} {test_score_id}. AVS ID: {summary_id}")
             return  # Exit early, skip all document processing
-        
-        # **CONTINUE WITH NORMAL PROCESSING FOR NON-ONLINE TESTS**
-        document_payload = details.get("documentPayload")
 
+        # **CONTINUE WITH NORMAL PROCESSING FOR NON-ONLINE TESTS**
         if not document_payload:
             raise ValueError("Document payload was missing from the Salesforce record.")
 

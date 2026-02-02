@@ -4,6 +4,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from app.config import DCI_OBJECT_API_NAME, READABLE_OBJECT_NAMES
+from app.core.processing_utils import should_skip_processing
 from app.services.document_extraction_service import DocumentExtractionError
 from app.services.salesforce_service import SalesforceAPIError
 
@@ -39,6 +40,22 @@ async def process_single_resume_detail(
         details = await asyncio.to_thread(sf_service.get_dci_document_data, resume_dci_id)
 
         document_payload = details.get("documentPayload")
+
+        # Cost optimization: Check if record should be skipped (100% verified, no changes)
+        existing_avs = await asyncio.to_thread(
+            sf_service.get_existing_avs_metadata,
+            application_id=parent_application_id,
+            name_value="Resume Detail Analysis"
+        )
+        skip, reason = should_skip_processing(
+            existing_avs=existing_avs,
+            record_last_modified=details.get("LastModifiedDate"),
+            document_last_modified=document_payload.get("LastModifiedDate") if document_payload else None
+        )
+        if skip:
+            logger.info(f"Skipping {readable_name} {resume_dci_id}: {reason}")
+            return f"Skipped {readable_name} - already 100% verified with no changes."
+
         if not document_payload:
             raise ValueError("No attached document found for this resume DCI record.")
 

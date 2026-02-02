@@ -262,9 +262,59 @@ class SalesforceService:
                 handler = getattr(self.sf, 'DocumentChecklistItem')
                 self._call_sf_api_with_retry(lambda: handler.update(dci_id, {AVS_TASK_DCI_LOOKUP_FIELD: summary_id}))
                 logger.info(f"Successfully linked Summary {summary_id} to DCI {dci_id}.")
-            except Exception as e: 
+            except Exception as e:
                 logger.error(f"Failed to update DocumentChecklistItem {dci_id}: {e}")
                 raise SalesforceAPIError(f"Failed to link summary {summary_id} to DCI {dci_id}: {e}")
+
+    def get_existing_avs_metadata(
+        self,
+        application_id: str,
+        education_history_id: Optional[str] = None,
+        test_id: Optional[str] = None,
+        affiliation_id: Optional[str] = None,
+        contact_id: Optional[str] = None,
+        name_value: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Query for existing AVS record and return metadata for skip-check logic.
+        Returns dict with 'LastModifiedDate' and 'Percentage_Confidence__c' if found, else None.
+        """
+        self._ensure_connected()
+        summary_obj_name = APPLICATION_VERIFICATION_SUMMARY_OBJECT_API_NAME
+
+        # Determine secondary lookup field
+        secondary_field, secondary_id = None, None
+        if contact_id:
+            secondary_field, secondary_id = AVS_CONTACT_LOOKUP_FIELD, contact_id
+        elif education_history_id:
+            secondary_field, secondary_id = AVS_EDUCATION_HISTORY_LOOKUP_FIELD, education_history_id
+        elif test_id:
+            secondary_field, secondary_id = AVS_TEST_LOOKUP_FIELD, test_id
+        elif affiliation_id:
+            secondary_field, secondary_id = AVS_AFFILIATION_LOOKUP_FIELD, affiliation_id
+
+        soql = f"SELECT Id, LastModifiedDate, {AVS_CONFIDENCE_FIELD} FROM {summary_obj_name} WHERE {AVS_APPLICATION_LOOKUP_FIELD} = '{application_id}'"
+        if secondary_field and secondary_id:
+            soql += f" AND {secondary_field} = '{secondary_id}'"
+        elif name_value:
+            soql += f" AND {AVS_NAME_FIELD} = '{name_value}'"
+        else:
+            return None  # Cannot query without secondary identifier
+        soql += " ORDER BY LastModifiedDate DESC LIMIT 1"
+
+        try:
+            result = self._call_sf_api_with_retry(lambda: self.sf.query(soql))
+            if result.get('totalSize', 0) > 0:
+                rec = result['records'][0]
+                return {
+                    'Id': rec.get('Id'),
+                    'LastModifiedDate': rec.get('LastModifiedDate'),
+                    'Percentage_Confidence__c': rec.get(AVS_CONFIDENCE_FIELD)
+                }
+            return None
+        except Exception as e:
+            logger.warning(f"Could not fetch existing AVS metadata for app {application_id}: {e}")
+            return None  # Non-fatal - proceed with processing if lookup fails
 
     def get_directly_related_record_ids(
         self,
