@@ -105,8 +105,7 @@ CONFIDENCE_PICKLIST_RANGES: List[str] = [ '100', '90 to 99', '80 to 90', '40 to 
 MAX_CONCURRENT_PROCESSING_SLOTS: int = int(os.getenv("MAX_CONCURRENT_PROCESSING_SLOTS", "15"))
 
 # Job execution timeouts
-JOB_TIMEOUT_SECONDS: int = int(os.getenv("JOB_TIMEOUT_SECONDS", "6
-000"))
+JOB_TIMEOUT_SECONDS: int = int(os.getenv("JOB_TIMEOUT_SECONDS", "6000"))
 
 # Simple throttle: minimum seconds between requests from same client (prevents spam)
 MIN_REQUEST_INTERVAL_SECONDS: float = float(os.getenv("MIN_REQUEST_INTERVAL_SECONDS", "1.0"))
