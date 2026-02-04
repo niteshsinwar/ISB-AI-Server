@@ -14,7 +14,9 @@ import asyncio
 import importlib
 import io
 from typing import Dict, Any, Optional
-from datetime import datetime
+
+# Import job run logger for tracking token usage and costs
+from app.core.job_run_logger import reset_job_logger
 
 # Preserve the original stdout pipe so we can emit JSON results cleanly.
 _RESULT_PIPE = sys.stdout
@@ -87,6 +89,12 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
     application_id = job_data.get('application_id', 'unknown')
 
     logger.info(f"Worker process {os.getpid()} starting job {job_id} for application {application_id}")
+
+    # Initialize job run logger for this attempt
+    job_logger = reset_job_logger()
+    existing_logs_json = job_data.get('existing_logs')
+    job_logger.load_existing_logs(existing_logs_json)
+    job_logger.start_attempt()
 
     try:
         # Import dependencies (fresh in this process)
@@ -178,7 +186,8 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
                     f"record {i+1}/{len(data['ids'])} (ID: {r_id})"
                 )
 
-                # Call processor - mirror original positional invocation order
+                # Call processor - processors now handle detailed token logging internally
+                # (doc extraction and crew processing are tracked separately)
                 if record_type == APPLICATION_OBJECT_API_NAME:
                     await func(
                         sf_service,
@@ -215,38 +224,50 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
             )
             _emit_progress_update(progress)
 
-        # All processing complete
+        # Finalize attempt as successful
+        job_logger.finalize_attempt(status="success")
+        logs_json = job_logger.get_logs_json()
+
+        # All processing complete - save logs to Salesforce
         await sf_service.upsert_ai_server_job(
             job_id=job_id,
             application_id=application_id,
             status="completed",
             message="All verification tasks completed successfully.",
-            progress_details=json.dumps(progress)
+            progress_details=json.dumps(progress),
+            logs=logs_json
         )
         _emit_progress_update(progress)
 
         logger.info(f"Worker {os.getpid()}: Job {job_id} completed successfully")
+        logger.info(f"Worker {os.getpid()}: Job logs: {job_logger.get_latest_attempt_summary()}")
 
         return {
             "status": "completed",
             "message": "All verification tasks completed successfully.",
             "progress": progress,
-            "error": None
+            "error": None,
+            "logs": job_logger.get_logs_dict()
         }
 
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Worker {os.getpid()}: Job {job_id} failed: {error_msg}", exc_info=True)
 
+        # Finalize attempt as failed
+        job_logger.finalize_attempt(status="failed", error=error_msg[:500])
+        logs_json = job_logger.get_logs_json()
+
         try:
-            # Try to update Salesforce with error
+            # Try to update Salesforce with error and logs
             if 'sf_service' in locals():
                 await sf_service.upsert_ai_server_job(
                     job_id=job_id,
                     application_id=application_id,
                     status="failed",
                     message=error_msg,
-                    progress_details=json.dumps(progress) if 'progress' in locals() else None
+                    progress_details=json.dumps(progress) if 'progress' in locals() else None,
+                    logs=logs_json
                 )
                 if 'progress' in locals():
                     _emit_progress_update(progress)
@@ -257,7 +278,8 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
             "status": "failed",
             "message": error_msg,
             "progress": progress if 'progress' in locals() else {},
-            "error": error_msg
+            "error": error_msg,
+            "logs": job_logger.get_logs_dict()
         }
 
 

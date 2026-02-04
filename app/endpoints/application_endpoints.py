@@ -2,6 +2,7 @@
 
 import logging
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Tuple
 
@@ -127,17 +128,30 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
                     progress=initial_progress
                 )
 
+            # Fetch existing logs for persistence across API triggers
+            existing_job_record = await sf_service.get_latest_ai_server_job(job.application_id)
+            existing_logs = existing_job_record.get('logs') if existing_job_record else None
+
             result = await process_manager.execute_job_in_worker(
                 job_id=job.job_id,
                 application_id=job.application_id,
                 sf_config=sf_config,
                 prefetched_data=prefetched_data,
-                progress_callback=handle_progress_update
+                progress_callback=handle_progress_update,
+                existing_logs=existing_logs
             )
 
             final_status = result.get("status", "completed")
             final_message = result.get("message") or "All verification tasks completed successfully."
             progress = result.get("progress")
+            # Extract logs from worker result and pass to update_status to prevent overwrite
+            worker_logs = result.get("logs")
+            logs_json = json.dumps(worker_logs) if worker_logs else None
+            
+            if logs_json:
+                logger.info(f"Passing logs to JobManager for final update (len={len(logs_json)})")
+            else:
+                logger.warning("No logs received from worker to pass to JobManager!")
 
             await job_manager.update_status(
                 job.application_id,
@@ -145,7 +159,8 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
                 final_status,
                 sf_service,
                 message=final_message,
-                progress=progress
+                progress=progress,
+                logs=logs_json
             )
         except WorkerProcessError as e:
             error_message = f"Worker process error: {e}"

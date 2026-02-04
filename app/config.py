@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # Load environment variables from .env file
 load_dotenv()
@@ -41,6 +41,7 @@ AIJ_STATUS_FIELD: str = os.getenv("AIJ_STATUS_FIELD", "Status__c")
 AIJ_MESSAGE_FIELD: str = os.getenv("AIJ_MESSAGE_FIELD", "Message__c")
 AIJ_PROGRESS_FIELD: str = os.getenv("AIJ_PROGRESS_FIELD", "Progress_Details__c")
 AIJ_CLIENT_FP_FIELD: str = os.getenv("AIJ_CLIENT_FP_FIELD", "Client_Fingerprint__c")
+AIJ_LOGS_FIELD: str = os.getenv("AIJ_LOGS_FIELD", "logs__c")
 
 APPLICATION_VERIFICATION_SUMMARY_OBJECT_API_NAME: str = "Application_Verification_Summary__c"
 AVS_APPLICATION_LOOKUP_FIELD: str = "Application__c"
@@ -86,16 +87,105 @@ APEX_ENDPOINT_PATHS: Dict[str, str] = {
 }
 
 # --- Google Gemini Configuration ---
-DOC_GOOGLE_API_KEY: str | None = os.getenv("DOC_GOOGLE_API_KEY")
-CREW_GOOGLE_API_KEY: str | None = os.getenv("CREW_GOOGLE_API_KEY")
-MODEL_DATA_ANALYSIS: str = os.getenv("MODEL_DATA_ANALYSIS")
-MODEL_COMPLEX_REASONING: str = os.getenv("MODEL_COMPLEX_REASONING")
-TEMP_COMPLEX_REASONING: float = float(os.getenv("TEMP_COMPLEX_REASONING"))
-MODEL_TEXT_EXTRACTION: str = os.getenv("MODEL_TEXT_EXTRACTION")
-MODEL_STANDARD_VERIFICATION: str = os.getenv("MODEL_STANDARD_VERIFICATION")
-MODEL_HTML_SYNTHESIS: str = os.getenv("MODEL_HTML_SYNTHESIS")
-TEMP_STANDARD_VERIFICATION: float = float(os.getenv("TEMP_STANDARD_VERIFICATION"))
-TEMP_HTML_SYNTHESIS: float = float(os.getenv("TEMP_HTML_SYNTHESIS"))
+DOC_GOOGLE_API_KEY: Optional[str] = os.getenv("DOC_GOOGLE_API_KEY")
+CREW_GOOGLE_API_KEY: Optional[str] = os.getenv("CREW_GOOGLE_API_KEY")
+MODEL_DATA_ANALYSIS: str = "gemini-2.5-flash"
+MODEL_COMPLEX_REASONING: str = "gemini-2.5-flash"
+TEMP_COMPLEX_REASONING: float = float(os.getenv("TEMP_COMPLEX_REASONING", "0.0"))
+MODEL_TEXT_EXTRACTION: str = "gemini-3.0-flash"
+MODEL_STANDARD_VERIFICATION: str = "gemini-2.5-flash"
+MODEL_HTML_SYNTHESIS: str = "gemini-2.5-flash"
+TEMP_STANDARD_VERIFICATION: float = float(os.getenv("TEMP_STANDARD_VERIFICATION", "0.0"))
+TEMP_HTML_SYNTHESIS: float = float(os.getenv("TEMP_HTML_SYNTHESIS", "0.0"))
+
+# --- Gemini API Pricing Configuration (per 1M tokens) ---
+# Source: https://ai.google.dev/gemini-api/docs/pricing
+# Last Updated: February 2026
+# Note: Thinking tokens (for 2.5 models) are billed as output tokens
+GEMINI_PRICING: Dict[str, Dict[str, float]] = {
+    "gemini-3-pro": {
+        "input_per_1m": 2.00,           # $2.00 per 1M input tokens (≤200k context)
+        "input_long_per_1m": 4.00,      # $4.00 per 1M input tokens (>200k context)
+        "output_per_1m": 12.00,         # $12.00 per 1M output tokens
+        "output_long_per_1m": 18.00,    # $18.00 per 1M output tokens (>200k context)
+    },
+    "gemini-3-flash": {
+        "input_per_1m": 0.50,           # $0.50 per 1M input tokens (text/image/video)
+        "input_audio_per_1m": 1.00,     # $1.00 per 1M audio input tokens
+        "input_long_per_1m": 0.50,
+        "output_per_1m": 3.00,          # $3.00 per 1M output tokens
+    },
+    "gemini-2.5-pro": {
+        "input_per_1m": 1.25,           # $1.25 per 1M input tokens (≤200k context)
+        "input_long_per_1m": 2.50,      # $2.50 per 1M input tokens (>200k context)
+        "output_per_1m": 10.00,         # $10.00 per 1M output tokens (includes thinking)
+        "output_long_per_1m": 15.00,    # $15.00 per 1M output tokens (>200k context)
+    },
+    "gemini-2.5-flash": {
+        "input_per_1m": 0.30,           # $0.30 per 1M input tokens (text/image/video)
+        "input_audio_per_1m": 1.00,     # $1.00 per 1M audio input tokens
+        "input_long_per_1m": 0.30,      # Same price for long context
+        "output_per_1m": 2.50,          # $2.50 per 1M output tokens (includes thinking)
+    },
+    "gemini-2.5-flash-lite": {
+        "input_per_1m": 0.10,           # $0.10 per 1M input tokens (text/image/video)
+        "input_audio_per_1m": 0.30,     # $0.30 per 1M audio input tokens
+        "input_long_per_1m": 0.10,
+        "output_per_1m": 0.40,          # $0.40 per 1M output tokens
+    },
+    "gemini-2.0-flash": {
+        "input_per_1m": 0.10,           # $0.10 per 1M input tokens
+        "input_long_per_1m": 0.10,
+        "output_per_1m": 0.40,          # $0.40 per 1M output tokens (no thinking tokens)
+    },
+    "gemini-2.0-flash-exp": {
+        "input_per_1m": 0.00,           # Free tier (experimental)
+        "input_long_per_1m": 0.00,
+        "output_per_1m": 0.00,
+    },
+    "gemini-1.5-pro": {
+        "input_per_1m": 1.25,
+        "input_long_per_1m": 2.50,
+        "output_per_1m": 5.00,
+    },
+    "gemini-1.5-flash": {
+        "input_per_1m": 0.075,
+        "input_long_per_1m": 0.15,
+        "output_per_1m": 0.30,
+    },
+}
+
+# Default pricing for unknown models
+GEMINI_DEFAULT_PRICING: Dict[str, float] = {
+    "input_per_1m": 1.00,
+    "input_long_per_1m": 2.00,
+    "output_per_1m": 5.00,
+}
+
+# Long context threshold (tokens) - pricing changes above this for some models
+LONG_CONTEXT_THRESHOLD: int = 200000
+
+# --- Multimodal Token Calculation ---
+# Gemini tokenizes images/audio/video into tokens for billing
+# Source: https://ai.google.dev/gemini-api/docs/pricing
+MULTIMODAL_TOKEN_CONFIG: Dict[str, Any] = {
+    "image": {
+        "tokens_per_image_1k": 560,     # ~560 tokens per image up to 1024x1024
+        "tokens_per_image_2k": 1120,    # ~1120 tokens per image up to 2048x2048
+        "tokens_per_image_4k": 2000,    # ~2000 tokens per image up to 4096x4096
+        "default_tokens": 560,          # Default for typical document images
+    },
+    "audio": {
+        "tokens_per_second": 25,        # 25 tokens per second of audio
+    },
+    "video": {
+        "tokens_per_second": 258,       # 258 tokens per second of video (1 fps)
+    },
+    "pdf": {
+        # PDFs are converted to images, so each page = image tokens
+        "tokens_per_page": 560,         # Approximate tokens per PDF page (converted to image)
+    },
+}
 
 # --- AI Crew Configuration ---
 CONFIDENCE_PICKLIST_RANGES: List[str] = [ '100', '90 to 99', '80 to 90', '40 to 80', '0 to 40' ]

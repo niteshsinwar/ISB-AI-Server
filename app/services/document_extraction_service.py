@@ -40,7 +40,8 @@ class OptimizedGeminiProcessor:
             google_api_key=DOC_GOOGLE_API_KEY,
             temperature=0.1,
             request_timeout=30.0,
-            max_retries=2
+            max_retries=2,
+            transport="rest"  # Use REST transport for network interceptor to capture usage
         )
         self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix=f"ocr-{id(self)}")
         self._shutdown = False

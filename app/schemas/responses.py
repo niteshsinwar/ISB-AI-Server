@@ -60,6 +60,7 @@ class JobStatusResponse(BaseModel):
     progress: Optional[Dict[str, Any]] = Field(None, description="Detailed progress of sub-tasks.")
     salesforce_job_record_id: Optional[str] = Field(None, description="The Salesforce Record ID of the persisted AI_Server_Job__c record.")
     client_fingerprint: Optional[str] = Field(None, description="The fingerprint of the client that initiated the job.")
+    logs: Optional[str] = Field(None, description="Complete job history logs (JSON string).")
     
 class QueueOverviewResponse(BaseModel):
     active_jobs: int = Field(..., description="Number of jobs currently in the 'processing' state.")

@@ -1,19 +1,221 @@
-# project_root/app/crew/crew_utils.py
 import logging
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union, List
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+
+import tiktoken
+import requests
+from requests.adapters import HTTPAdapter
+
+from app.config import GEMINI_PRICING, GEMINI_DEFAULT_PRICING, LONG_CONTEXT_THRESHOLD
+
 logger = logging.getLogger(__name__)
+
+# Global usage accumulator with cost tracking
+_GLOBAL_TOKEN_USAGE = {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0,
+    "successful_requests": 0,
+    "total_cost_usd": 0.0,
+    "cost_breakdown": []  # List of per-request costs
+}
+
+def get_model_pricing(model_name: str) -> Dict[str, float]:
+    """Get pricing for a specific model, with fallback to default."""
+    model_key = model_name.lower()
+    for key in GEMINI_PRICING:
+        if key in model_key or model_key in key:
+            return GEMINI_PRICING[key]
+    return GEMINI_DEFAULT_PRICING
+
+def calculate_cost(prompt_tokens: int, completion_tokens: int, model_name: str) -> Dict[str, float]:
+    """
+    Calculate cost for a single API call.
+
+    Args:
+        prompt_tokens: Number of input/prompt tokens
+        completion_tokens: Number of output/completion tokens (includes thinking tokens)
+        model_name: Name of the model used
+
+    Returns:
+        Dict with input_cost, output_cost, and total_cost in USD
+    """
+    pricing = get_model_pricing(model_name)
+    long_context = prompt_tokens > LONG_CONTEXT_THRESHOLD
+
+    input_rate = pricing["input_long_per_1m"] if long_context else pricing["input_per_1m"]
+    output_rate = pricing["output_per_1m"]
+
+    input_cost = (prompt_tokens / 1_000_000) * input_rate
+    output_cost = (completion_tokens / 1_000_000) * output_rate
+    total_cost = input_cost + output_cost
+
+    return {
+        "input_cost": round(input_cost, 6),
+        "output_cost": round(output_cost, 6),
+        "total_cost": round(total_cost, 6),
+        "model": model_name,
+        "pricing_used": {
+            "input_rate_per_1m": input_rate,
+            "output_rate_per_1m": output_rate
+        }
+    }
+
+# from langchain.callbacks.base import BaseCallbackHandler
+# from langchain.schema import LLMResult
+
+# Global usage accumulator
+_GLOBAL_TOKEN_USAGE = {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0,
+    "successful_requests": 0,
+    "total_cost_usd": 0.0,
+    "cost_breakdown": []
+}
+
+# Store original request method
+_original_request = requests.Session.request
+
+def _intercept_google_usage(self, method, url, *args, **kwargs):
+    """
+    Intercept Google Gemini API calls to track token usage globally.
+    Handles both streaming and non-streaming responses.
+    """
+    # Execute the request first
+    response = _original_request(self, method, url, *args, **kwargs)
+    
+    try:
+        # Check if it's a Gemini API call
+        is_google = "generativelanguage.googleapis.com" in url
+        
+        if is_google and method.upper() == "POST":
+            try:
+                data = response.json()
+                usage = None
+                # Basic model extraction from URL/args could be improved, but this works for now
+                model_name = "gemini-pro"
+                if "gemini-1.5-flash" in url: model_name = "gemini-1.5-flash"
+                elif "gemini-1.5-pro" in url: model_name = "gemini-1.5-pro"
+                elif "gemini-2.5-flash" in url: model_name = "gemini-2.5-flash"
+
+                # Handle streaming response (returns a list of chunks)
+                if isinstance(data, list):
+                    # For streaming, usage metadata is typically in the last chunk
+                    for chunk in reversed(data):
+                        if isinstance(chunk, dict) and "usageMetadata" in chunk:
+                            usage = chunk.get("usageMetadata", {})
+                            break
+                # Handle non-streaming response (returns a dict)
+                elif isinstance(data, dict):
+                    usage = data.get("usageMetadata", {})
+
+                if usage:
+                    p_tokens = usage.get("promptTokenCount", 0)
+                    c_tokens = usage.get("candidatesTokenCount", 0)
+                    total = usage.get("totalTokenCount", 0)
+                    
+                    # Calculate cost for this request
+                    cost_info = calculate_cost(p_tokens, c_tokens, model_name)
+
+                    logger.info(f"[Network Interceptor] Captured "
+                               f"[{model_name}]: {p_tokens} prompt, {c_tokens} completion "
+                               f"| Cost: ${cost_info['total_cost']:.6f}")
+
+                    # Use global variable directly
+                    _GLOBAL_TOKEN_USAGE["prompt_tokens"] += p_tokens
+                    _GLOBAL_TOKEN_USAGE["completion_tokens"] += c_tokens
+                    _GLOBAL_TOKEN_USAGE["total_tokens"] += total
+                    _GLOBAL_TOKEN_USAGE["successful_requests"] += 1
+                    _GLOBAL_TOKEN_USAGE["total_cost_usd"] += cost_info["total_cost"]
+                    _GLOBAL_TOKEN_USAGE["cost_breakdown"].append({
+                        "model": model_name,
+                        "prompt_tokens": p_tokens,
+                        "completion_tokens": c_tokens,
+                        "total_cost": cost_info["total_cost"]
+                    })
+            except Exception:
+                pass # Silent fail on parsing if not JSON
+    except Exception as e:
+        logger.warning(f"Interceptor error: {e}")
+
+    return response
+
+# Apply the patch
+requests.Session.request = _intercept_google_usage
+# ---------------------------------------------------
+
+def _count_tokens(text: str) -> int:
+    """Count tokens using tiktoken (proxy available for offline estimation)."""
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")
+        return len(encoding.encode(text))
+    except Exception:
+        return 0
+
+def reset_global_usage():
+    """Reset the global token usage accumulator in-place."""
+    _GLOBAL_TOKEN_USAGE.clear()
+    _GLOBAL_TOKEN_USAGE.update({
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "successful_requests": 0,
+        "total_cost_usd": 0.0,
+        "cost_breakdown": []
+    })
+
+def get_global_token_usage():
+    """Safe getter for the global token usage dict."""
+    return _GLOBAL_TOKEN_USAGE
+
+def get_job_cost_summary() -> Dict[str, Any]:
+    """Get a summary of token usage and costs for the current job."""
+    global _GLOBAL_TOKEN_USAGE
+
+    # Calculate per-model breakdown
+    model_costs = {}
+    for entry in _GLOBAL_TOKEN_USAGE.get("cost_breakdown", []):
+        model = entry.get("model", "unknown")
+        if model not in model_costs:
+            model_costs[model] = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "thinking_tokens": 0,
+                "total_cost": 0.0,
+                "request_count": 0
+            }
+        model_costs[model]["prompt_tokens"] += entry.get("prompt_tokens", 0)
+        model_costs[model]["completion_tokens"] += entry.get("completion_tokens", 0)
+        model_costs[model]["thinking_tokens"] += entry.get("thinking_tokens", 0)
+        model_costs[model]["total_cost"] += entry.get("total_cost", 0)
+        model_costs[model]["request_count"] += 1
+
+    return {
+        "totals": {
+            "prompt_tokens": _GLOBAL_TOKEN_USAGE["prompt_tokens"],
+            "completion_tokens": _GLOBAL_TOKEN_USAGE["completion_tokens"],
+            "total_tokens": _GLOBAL_TOKEN_USAGE["total_tokens"],
+            "successful_requests": _GLOBAL_TOKEN_USAGE["successful_requests"],
+            "total_cost_usd": round(_GLOBAL_TOKEN_USAGE.get("total_cost_usd", 0), 6)
+        },
+        "per_model": model_costs,
+        "detailed_breakdown": _GLOBAL_TOKEN_USAGE.get("cost_breakdown", [])
+    }
 
 def initialize_llm(model: str, temperature: float, api_key: str) -> Optional[ChatGoogleGenerativeAI]:
     """Initialize the LLM with the given model and temperature."""
     try:
+        # Note: Token counting is now handled by the global network interceptor
+        
         llm = ChatGoogleGenerativeAI(
             model=model,
             temperature=temperature,
             google_api_key=api_key,
-            model_kwargs={"response_mime_type": "application/json"}
+            model_kwargs={"response_mime_type": "application/json"},
+            transport="rest"
         )
 
         logger.info(f"LLM initialized with model: {model}")
@@ -49,9 +251,6 @@ def log_error(message: str, exc_info: bool = True):
     """Log an error message with optional exception information."""
     logger.error(message, exc_info=exc_info)
 
-# FIX: The decorator is now a simple class-based decorator that takes no arguments.
-# This aligns with the new "fail-fast" strategy where we raise an exception
-# instead of returning a default value.
 class CrewErrorHandler:
     """Decorator to handle errors in crew execution, raising an exception on failure."""
     def __call__(self, func):
@@ -68,3 +267,96 @@ class CrewErrorHandler:
                 # Re-raise the exception to be caught by the main processor, ensuring the job fails
                 raise ValueError(f"Crew execution failed: {e}")
         return wrapper
+
+def log_step_info(step: Any):
+    """Log the internal dialogue/step of an agent and accumulate token usage."""
+    global _GLOBAL_TOKEN_USAGE
+    try:
+        # Standardize step identification
+        if hasattr(step, 'agent'):
+             logger.info(f"[Agent Step] Agent: {step.agent.role if hasattr(step.agent, 'role') else step.agent}")
+        
+        prompt_segment = ""
+        completion_segment = ""
+
+        if hasattr(step, 'thought'):
+             logger.info(f"[Agent Step] Thought: {step.thought}")
+             prompt_segment += str(step.thought)
+        if hasattr(step, 'tool'):
+             logger.info(f"[Agent Step] Tool: {step.tool}")
+             prompt_segment += str(step.tool)
+        if hasattr(step, 'tool_input'):
+             logger.info(f"[Agent Step] Input: {step.tool_input}")
+             prompt_segment += str(step.tool_input)
+        
+        # Output/Result
+        if hasattr(step, 'result'):
+             result_str = str(step.result)
+             logger.info(f"[Agent Step] Result found (length {len(result_str)})")
+             completion_segment += result_str
+        
+        # Calculate tokens
+        p_tokens = _count_tokens(prompt_segment)
+        c_tokens = _count_tokens(completion_segment)
+        
+
+        # Intercepting approach renders the step-based calculation redundant but good for backup.
+        # We will log the TEXT but not add to the accumulator here to avoid double counting 
+        # if the network interceptor is working. However, since the network interceptor works
+        # on the response level, and this works on the logical level, let's trust the network interceptor
+        # for 'exact' usage.
+        
+        # logger.info(f"[Token Tracker] Step added: {p_tokens} prompt, {c_tokens} completion.")
+
+    except Exception as e:
+        logger.warning(f"Failed to log step info: {e}")
+
+def get_crew_usage_metrics(crew_output: Any) -> Dict[str, Any]:
+    """Extract usage metrics from CrewOutput."""
+    try:
+        # Debugging: Log available attributes to find where token usage is hiding
+        logger.info(f"Inspecting CrewOutput attributes: {dir(crew_output)}")
+        if hasattr(crew_output, 'token_usage'):
+            logger.info(f"CrewOutput.token_usage raw: {crew_output.token_usage}")
+        if hasattr(crew_output, 'raw'):
+             logger.info(f"CrewOutput.raw length: {len(crew_output.raw)}")
+
+        if hasattr(crew_output, 'token_usage'):
+            usage = crew_output.token_usage
+            # Check if usage is empty/zero
+            usage_dict = {}
+            if hasattr(usage, 'model_dump'):
+                usage_dict = usage.model_dump()
+            elif isinstance(usage, dict):
+                usage_dict = usage
+            else:
+                 usage_dict = {
+                    "total_tokens": getattr(usage, 'total_tokens', 0),
+                    "prompt_tokens": getattr(usage, 'prompt_tokens', 0),
+                    "completion_tokens": getattr(usage, 'completion_tokens', 0),
+                    "successful_requests": getattr(usage, 'successful_requests', 0)
+                }
+            
+            # If crew usage is roughly empty but global usage has data, use global usage
+            if usage_dict.get("total_tokens", 0) == 0 and _GLOBAL_TOKEN_USAGE["total_tokens"] > 0:
+                 logger.info(f"Crew usage is empty. Using global interceptor usage: {_GLOBAL_TOKEN_USAGE}")
+                 return _GLOBAL_TOKEN_USAGE
+            
+            # Return combined or raw if valid
+            if usage_dict.get("total_tokens", 0) > 0:
+                return usage_dict
+
+        # Fallback to global if token_usage attr was missing or zero
+        if _GLOBAL_TOKEN_USAGE["total_tokens"] > 0:
+             logger.info("Using global accumulated token usage as fallback.")
+             return _GLOBAL_TOKEN_USAGE
+             
+        return {}
+
+    except Exception as e:
+        logger.warning(f"Failed to extract usage metrics: {e}")
+        # Fallback to global accumulator if extraction failed
+        if _GLOBAL_TOKEN_USAGE["total_tokens"] > 0:
+             logger.info("Using global accumulated token usage as fallback.")
+             return _GLOBAL_TOKEN_USAGE
+        return {}

@@ -56,6 +56,7 @@ class ProcessManager:
         prefetched_data: Dict[str, Any],
         timeout_seconds: Optional[int] = None,
         progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        existing_logs: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Execute a job in an isolated worker process.
@@ -84,7 +85,8 @@ class ProcessManager:
             'job_id': job_id,
             'application_id': application_id,
             'sf_config': sf_config,
-            'prefetched_data': prefetched_data
+            'prefetched_data': prefetched_data,
+            'existing_logs': existing_logs
         }
 
         # Spawn worker process
@@ -146,12 +148,21 @@ class ProcessManager:
             # Use same Python interpreter as main process
             python_executable = sys.executable
 
+            # Prepare environment with project root in PYTHONPATH
+            env = os.environ.copy()
+            # __file__ is app/core/process_manager.py -> root is 3 levels up
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            python_path = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = f"{project_root}:{python_path}" if python_path else project_root
+
             process = await asyncio.create_subprocess_exec(
                 python_executable,
                 self.worker_script_path,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # Pass the modified environment
+                env=env,
                 # Process group for easier cleanup
                 preexec_fn=os.setpgrp if hasattr(os, 'setpgrp') else None
             )
@@ -227,7 +238,7 @@ class ProcessManager:
                 if exit_code != 0:
                     logger.error(f"Worker {process.pid} stderr:\n{stderr_text}")
                 else:
-                    logger.debug(f"Worker {process.pid} stderr:\n{stderr_text}")
+                    logger.info(f"Worker {process.pid} stderr:\n{stderr_text}")
 
             if not final_result:
                 raise WorkerProcessError(

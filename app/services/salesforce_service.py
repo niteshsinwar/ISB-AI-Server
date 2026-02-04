@@ -25,7 +25,7 @@ from app.config import (
     AVS_AFFILIATION_LOOKUP_FIELD, AVS_REPORT_FIELD, AVS_NAME_FIELD,
     AVS_OVERALL_FEEDBACK_FIELD, AVS_MISMATCHED_LIST_FIELD, AVS_CONFIDENCE_FIELD, AVS_TASK_DCI_LOOKUP_FIELD,
     AI_SERVER_JOB_OBJECT_API_NAME, AIJ_APPLICATION_LOOKUP_FIELD, AIJ_JOB_ID_FIELD,
-    AIJ_STATUS_FIELD, AIJ_MESSAGE_FIELD, AIJ_PROGRESS_FIELD, AIJ_CLIENT_FP_FIELD,
+    AIJ_STATUS_FIELD, AIJ_MESSAGE_FIELD, AIJ_PROGRESS_FIELD, AIJ_CLIENT_FP_FIELD, AIJ_LOGS_FIELD,
     DCI_OBJECT_API_NAME, DCI_STATUS_FIELD,
     APPLICATION_OBJECT_API_NAME, APPLICATION_CONTACT_LOOKUP_FIELD_ON_APP
 )
@@ -146,7 +146,7 @@ class SalesforceService:
 
     async def upsert_ai_server_job(self, job_id: str, application_id: str, status: str, **kwargs) -> str:
         self._ensure_connected()
-        soql = f"SELECT Id FROM {AI_SERVER_JOB_OBJECT_API_NAME} WHERE {AIJ_APPLICATION_LOOKUP_FIELD} = '{application_id}' LIMIT 1"
+        soql = f"SELECT Id, {AIJ_LOGS_FIELD} FROM {AI_SERVER_JOB_OBJECT_API_NAME} WHERE {AIJ_APPLICATION_LOOKUP_FIELD} = '{application_id}' LIMIT 1"
         def do_query():
             # Use lambda to access self.sf at call time, not closure creation time
             return self._call_sf_api_with_retry(lambda: self.sf.query(soql))
@@ -165,14 +165,31 @@ class SalesforceService:
         if message := kwargs.get('message'): payload[AIJ_MESSAGE_FIELD] = message[:131072]
         if progress_details := kwargs.get('progress_details'): payload[AIJ_PROGRESS_FIELD] = progress_details
         if client_fp := kwargs.get('client_fingerprint'): payload[AIJ_CLIENT_FP_FIELD] = client_fp
+        if logs := kwargs.get('logs'):
+            payload[AIJ_LOGS_FIELD] = logs[:131072]
+            logger.info(f"Upserting job {job_id}: Included logs payload (len={len(payload[AIJ_LOGS_FIELD])})")
+        else:
+            logger.info(f"Upserting job {job_id}: Logs payload NOT included.")
         
         handler = getattr(self.sf, AI_SERVER_JOB_OBJECT_API_NAME)
         
         try:
             if result['totalSize'] > 0:
-                existing_id = result['records'][0]['Id']
+                record = result['records'][0]
+                existing_id = record['Id']
                 update_payload = payload.copy()
                 del update_payload[AIJ_APPLICATION_LOOKUP_FIELD]
+
+                # CRITICAL FIX: Preserve existing logs if not receiving new ones.
+                # Salesforce automation appears to clear the field if omitted from update.
+                if AIJ_LOGS_FIELD not in update_payload:
+                    existing_logs = record.get(AIJ_LOGS_FIELD)
+                    # Only include if there's something to preserve (sending None might clear it if it wasn't None, which is fine)
+                    # Actually, if we send None, it might clear it. If we omit, it clears it (per testing).
+                    # So safely sending back what we found is the best bet.
+                    update_payload[AIJ_LOGS_FIELD] = existing_logs
+                    logger.info(f"Preserving existing logs for job {job_id} (len={len(existing_logs) if existing_logs else 0})")
+
                 def do_update():
                     return self._call_sf_api_with_retry(lambda: handler.update(existing_id, update_payload))
                 response = await asyncio.get_event_loop().run_in_executor(None, do_update)
@@ -192,7 +209,7 @@ class SalesforceService:
 
     async def get_latest_ai_server_job(self, application_id: str) -> Optional[Dict[str, Any]]:
         self._ensure_connected()
-        soql = f"SELECT Id, {AIJ_JOB_ID_FIELD}, {AIJ_STATUS_FIELD}, {AIJ_MESSAGE_FIELD}, CreatedDate, LastModifiedDate, {AIJ_PROGRESS_FIELD}, {AIJ_CLIENT_FP_FIELD} FROM {AI_SERVER_JOB_OBJECT_API_NAME} WHERE {AIJ_APPLICATION_LOOKUP_FIELD} = '{application_id}' ORDER BY CreatedDate DESC LIMIT 1"
+        soql = f"SELECT Id, {AIJ_JOB_ID_FIELD}, {AIJ_STATUS_FIELD}, {AIJ_MESSAGE_FIELD}, CreatedDate, LastModifiedDate, {AIJ_PROGRESS_FIELD}, {AIJ_CLIENT_FP_FIELD}, {AIJ_LOGS_FIELD} FROM {AI_SERVER_JOB_OBJECT_API_NAME} WHERE {AIJ_APPLICATION_LOOKUP_FIELD} = '{application_id}' ORDER BY CreatedDate DESC LIMIT 1"
         def do_query(): return self._call_sf_api_with_retry(lambda: self.sf.query(soql))
         try:
             result = await asyncio.get_event_loop().run_in_executor(None, do_query)
@@ -204,7 +221,8 @@ class SalesforceService:
                     "status": rec.get(AIJ_STATUS_FIELD), "message": rec.get(AIJ_MESSAGE_FIELD),
                     "created_at": rec.get("CreatedDate"), "last_updated_at": rec.get("LastModifiedDate"),
                     "progress": progress, "salesforce_job_record_id": rec.get("Id"),
-                    "client_fingerprint": rec.get(AIJ_CLIENT_FP_FIELD)
+                    "client_fingerprint": rec.get(AIJ_CLIENT_FP_FIELD),
+                    "logs": rec.get(AIJ_LOGS_FIELD)
                 }
             return None # It's correct to return None if no job is found.
         except Exception as e:

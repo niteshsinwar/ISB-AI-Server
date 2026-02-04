@@ -32,6 +32,7 @@ class ValidatedCrewReport(BaseModel):
     overall_feedback: constr(min_length=1)
     confidence_range: int = Field(..., ge=0, le=100)
     mismatched_field_list: constr(min_length=1)
+    verification_status: Literal["Passed", "Failed", "Needs Review"] = "Needs Review"
 
 # Fields to Exclude
 FIELDS_TO_EXCLUDE_FROM_PROCESSING: List[str] = [
@@ -110,7 +111,8 @@ class ApplicationVerificationCrewOrchestrator:
             agents=[comparator_agent, report_agent],
             tasks=[compare_task, report_task],
             process=Process.sequential,
-            verbose=2
+            verbose=2,
+            cache=False
         )
 
         result = crew.kickoff()

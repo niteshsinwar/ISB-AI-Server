@@ -1,5 +1,6 @@
 # project_root/app/processors/employment_processor.py
 import logging
+import os
 import asyncio
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -9,14 +10,31 @@ from app.config import (
     READABLE_OBJECT_NAMES
 )
 from app.core.processing_utils import should_skip_processing
+from app.core.job_run_logger import get_job_logger
+from app.crew.crew_utils import reset_global_usage, get_job_cost_summary
 from app.services.document_extraction_service import DocumentExtractionError
 from app.services.salesforce_service import SalesforceAPIError
 
 if TYPE_CHECKING:
     from app.services.salesforce_service import SalesforceService
-    from app.crew.employment_crew import EmploymentVerificationCrewOrchestrator
 
 logger = logging.getLogger(__name__)
+
+
+def _capture_usage() -> Dict[str, Any]:
+    """Capture current usage from global accumulator."""
+    summary = get_job_cost_summary()
+    model = "unknown"
+    breakdown = summary.get("detailed_breakdown", [])
+    if breakdown:
+        model = breakdown[-1].get("model", "unknown")
+    totals = summary.get("totals", {})
+    return {
+        "input_tokens": totals.get("prompt_tokens", 0),
+        "output_tokens": totals.get("completion_tokens", 0),
+        "cost": totals.get("total_cost_usd", 0.0),
+        "model": model
+    }
 
 def _format_error(record_id: str, component: str, reason: str, technical_error: str) -> str:
     """Creates a standardized error message for logging and reporting."""
@@ -34,8 +52,6 @@ async def process_single_employment_detail(
     logger.info(f"Starting {readable_name} processing for Log ID: {employment_log_id}")
 
     from app.services.document_extraction_service import extract_text_from_file, create_text_extractor
-    from app.crew.employment_crew import EmploymentVerificationCrewOrchestrator
-
     # Use provided extractor or create a per-job extractor
     if extractor_instance is None:
         extractor_instance = create_text_extractor()
@@ -64,6 +80,17 @@ async def process_single_employment_detail(
             )
             if skip:
                 logger.info(f"Skipping {readable_name} {employment_log_id}: {reason}")
+                
+                # Log skipped status
+                job_logger = get_job_logger()
+                job_logger.add_detailed_record_log(
+
+                    record_type=f"Employment_{item_index or employment_log_id[:8]}", # Using same logic as below
+                    doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                    crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                    status="skipped",
+                    error=reason
+                )
                 return f"Skipped {readable_name} - already 100% verified with no changes."
 
         # Check for graceful fallback scenario (from top level or record data)
@@ -81,6 +108,14 @@ async def process_single_employment_detail(
                 mismatched_field_list=None,
                 affiliation_id=actual_employment_detail_id
             )
+            job_logger = get_job_logger()
+            job_logger.add_detailed_record_log(
+                record_type=f"Employment_{item_index or employment_log_id[:8]}",
+                doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                status="failed",
+                error=fallback_summary
+            )
             logger.info(f"Created fallback AVS for {readable_name} {employment_log_id}. AVS ID: {summary_id}")
             return f"Processed {readable_name} with data issue fallback."
 
@@ -94,12 +129,39 @@ async def process_single_employment_detail(
         if not base64_data or not file_extension:
             raise ValueError("Document content (base64) or file extension missing.")
 
+        # Reset usage before doc extraction
+        reset_global_usage()
+
         document_text_string = await extract_text_from_file(base64_data, file_extension, record_id=employment_log_id, extractor=extractor_instance)
 
-        emp_crew = EmploymentVerificationCrewOrchestrator(record_data, document_text_string)
-        report_dict = await asyncio.to_thread(emp_crew.run)
+        # Capture doc extraction usage
+        doc_usage = _capture_usage()
+        logger.info(f"Doc extraction usage for {employment_log_id}: {doc_usage}")
+
+        # Reset usage before crew processing
+        reset_global_usage()
+
+        # LangGraph Execution
+        logger.info(f"Using LangGraph for {readable_name} {employment_log_id}")
+        from app.langgraph.employment_graph import EmploymentGraphOrchestrator
+        emp_orchestrator = EmploymentGraphOrchestrator(record_data, document_text_string)
+        report_dict = await asyncio.to_thread(emp_orchestrator.run)
+
         if not report_dict:
-            raise ValueError("Crew did not return a valid report.")
+            raise ValueError("Graph execution did not return a valid report.")
+
+        # Capture processing usage
+        crew_usage = _capture_usage()
+        logger.info(f"Graph processing usage for {employment_log_id}: {crew_usage}")
+
+        # Log detailed usage to job logger
+        job_logger = get_job_logger()
+        job_logger.add_detailed_record_log(
+            record_type=f"Employment_{item_index or employment_log_id[:8]}",
+            doc_usage=doc_usage,
+            crew_usage=crew_usage,
+            status="completed"
+        )
 
         summary_name = f"Employment Analysis ({item_index})" if item_index else f"Employment Analysis"
         summary_id = await asyncio.to_thread(
@@ -116,12 +178,39 @@ async def process_single_employment_detail(
         logger.info(f"Successfully processed {readable_name} {employment_log_id}. AVS ID: {summary_id}")
 
     except SalesforceAPIError as e:
-        if '500 Server Error' in str(e):
+        error_msg = str(e)
+        job_logger = get_job_logger()
+        job_logger.add_detailed_record_log(
+            record_type=f"Employment_{item_index or employment_log_id[:8]}" if 'item_index' in locals() else f"Employment_{employment_log_id[:8]}",
+            doc_usage=_capture_usage(),
+            crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "error"},
+            status="failed",
+            error=error_msg
+        )
+        if '500 Server Error' in error_msg:
             reason = "Data provider failed. This is likely due to a missing document or invalid data on the Salesforce record. Please verify the record and its attachments."
             raise ValueError(_format_error(employment_log_id, "Salesforce Data", reason, str(e)))
         else:
             raise ValueError(_format_error(employment_log_id, "Salesforce API", "An API error occurred", str(e)))
     except DocumentExtractionError as e:
+        error_msg = str(e)
+        job_logger = get_job_logger()
+        job_logger.add_detailed_record_log(
+            record_type=f"Employment_{item_index or employment_log_id[:8]}" if 'item_index' in locals() else f"Employment_{employment_log_id[:8]}",
+            doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "failed"},
+            crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+            status="failed",
+            error=error_msg
+        )
         raise ValueError(_format_error(employment_log_id, "Document Extraction", "Failed to extract text from document", str(e)))
     except Exception as e:
+        error_msg = str(e)
+        job_logger = get_job_logger()
+        job_logger.add_detailed_record_log(
+            record_type=f"Employment_{item_index or employment_log_id[:8]}" if 'item_index' in locals() else f"Employment_{employment_log_id[:8]}",
+            doc_usage=_capture_usage(),
+            crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "error"},
+            status="failed",
+            error=error_msg
+        )
         raise ValueError(_format_error(employment_log_id, "Processing", "An unexpected error occurred", str(e)))

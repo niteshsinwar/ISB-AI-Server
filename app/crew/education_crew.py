@@ -11,7 +11,8 @@ from app.config import (
     MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS
 )
 from app.crew.crew_utils import (
-    initialize_llm, clean_and_extract_json, log_error, CrewErrorHandler
+    initialize_llm, clean_and_extract_json, log_error, CrewErrorHandler,
+    log_step_info, get_crew_usage_metrics
 )
 from app.crew.crew_prompts import (
     EDUCATION_DATA_COMPARATOR_AGENT_GOAL,
@@ -32,6 +33,7 @@ class ValidatedCrewReport(BaseModel):
     overall_feedback: constr(min_length=1)
     confidence_range: int = Field(..., ge=0, le=100)
     mismatched_field_list: constr(min_length=1)
+    verification_status: Literal["Passed", "Failed", "Needs Review"] = "Needs Review"
 # Fields to Exclude
 FIELDS_TO_EXCLUDE_FROM_PROCESSING: List[str] = [
     'Applicant__c', 'type', 'Contact', 'recordId', 'Task_Id','triggeringLogId','Id', 'DocumentchecklistItem_Id'
@@ -105,7 +107,15 @@ class EducationVerificationCrewOrchestrator:
         compare_task = tasks.compare_data_task(comparator_agent, self.document_text, self.record_data, verifiable_apex_field_names)
         report_task = tasks.generate_final_report_task(report_agent, "{compare_task_output}")
 
-        crew = Crew(agents=[comparator_agent, report_agent], tasks=[compare_task, report_task], process=Process.sequential, verbose=2)
+        # MODIFIED: Added step_callback for internal dialogue logging
+        crew = Crew(
+            agents=[comparator_agent, report_agent],
+            tasks=[compare_task, report_task],
+            process=Process.sequential,
+            verbose=2,
+            step_callback=log_step_info,
+            cache=False
+        )
         result = crew.kickoff()
         
         final_json_str = clean_and_extract_json(str(result))
@@ -115,6 +125,23 @@ class EducationVerificationCrewOrchestrator:
         try:
             final_json = json.loads(final_json_str)
             validated_report = ValidatedCrewReport(**final_json)
-            return validated_report.model_dump()
+            
+
+            # MODIFIED: Return both report data and usage metrics
+            report_data = validated_report.model_dump()
+            usage_metrics = get_crew_usage_metrics(result)
+            
+            # Enrich usage metrics with model info
+            usage_metrics["model_config"] = {
+                "comparator_model": MODEL_COMPLEX_REASONING,
+                "reporter_model": MODEL_HTML_SYNTHESIS
+            }
+            
+            # Merge usage metrics into the result or keep separate. 
+            # For now, we mix them in but typically we might want a cleaner structure.
+            # Using a reserved key '_meta' or similar if acceptable, but let's just 
+            # ensure keys don't collide.
+            return {**report_data, "usage_metrics": usage_metrics}
+            
         except Exception as e:
             raise ValueError(f"Failed to parse or validate final crew report: {e}")

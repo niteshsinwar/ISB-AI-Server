@@ -1,5 +1,6 @@
 # project_root/app/processors/test_score_processor.py
 import logging
+import os
 import asyncio
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -9,14 +10,31 @@ from app.config import (
     READABLE_OBJECT_NAMES
 )
 from app.core.processing_utils import should_skip_processing
+from app.core.job_run_logger import get_job_logger
+from app.crew.crew_utils import reset_global_usage, get_job_cost_summary
 from app.services.document_extraction_service import DocumentExtractionError
 from app.services.salesforce_service import SalesforceAPIError
 
 if TYPE_CHECKING:
     from app.services.salesforce_service import SalesforceService
-    from app.crew.test_score_crew import TestScoreVerificationCrewOrchestrator
 
 logger = logging.getLogger(__name__)
+
+
+def _capture_usage() -> Dict[str, Any]:
+    """Capture current usage from global accumulator."""
+    summary = get_job_cost_summary()
+    model = "unknown"
+    breakdown = summary.get("detailed_breakdown", [])
+    if breakdown:
+        model = breakdown[-1].get("model", "unknown")
+    totals = summary.get("totals", {})
+    return {
+        "input_tokens": totals.get("prompt_tokens", 0),
+        "output_tokens": totals.get("completion_tokens", 0),
+        "cost": totals.get("total_cost_usd", 0.0),
+        "model": model
+    }
 
 def _format_error(record_id: str, component: str, reason: str, technical_error: str) -> str:
     """Creates a standardized error message for logging and reporting."""
@@ -34,8 +52,6 @@ async def process_single_test_score_detail(
     logger.info(f"Starting {readable_name} processing for ID: {test_score_id}")
 
     from app.services.document_extraction_service import extract_text_from_file, create_text_extractor
-    from app.crew.test_score_crew import TestScoreVerificationCrewOrchestrator
-
     # Use provided extractor or create a per-job extractor
     if extractor_instance is None:
         extractor_instance = create_text_extractor()
@@ -62,6 +78,16 @@ async def process_single_test_score_detail(
         )
         if skip:
             logger.info(f"Skipping {readable_name} {test_score_id}: {reason}")
+            
+            # Log skipped status
+            job_logger = get_job_logger()
+            job_logger.add_detailed_record_log(
+                record_type=f"TestScore_{record_data.get('RecordTypeName__c') or item_index or test_score_id}",
+                doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                status="skipped",
+                error=reason
+            )
             return f"Skipped {readable_name} - already 100% verified with no changes."
 
         # **CHECK FOR GRACEFUL FALLBACK SCENARIO FIRST** (from top level or record data)
@@ -79,6 +105,14 @@ async def process_single_test_score_detail(
                 confidence_range="0",
                 mismatched_field_list=None,
                 test_id=test_score_id
+            )
+            job_logger = get_job_logger()
+            job_logger.add_detailed_record_log(
+                record_type=f"TestScore_{name_suffix}",
+                doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                status="failed",
+                error=fallback_summary
             )
             logger.info(f"Created fallback AVS for {readable_name} {test_score_id}. AVS ID: {summary_id}")
             return f"Processed {readable_name} with data issue fallback."
@@ -102,6 +136,13 @@ async def process_single_test_score_detail(
             )
             
             logger.info(f"Successfully processed Online {readable_name} {test_score_id}. AVS ID: {summary_id}")
+            
+            job_logger.add_detailed_record_log(
+                record_type=f"TestScore_{name_suffix}",
+                doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                status="completed"
+            )
             return  # Exit early, skip all document processing
 
         # **CONTINUE WITH NORMAL PROCESSING FOR NON-ONLINE TESTS**
@@ -113,15 +154,41 @@ async def process_single_test_score_detail(
         if not base64_data or not file_extension:
             raise ValueError("Document content (base64) or file extension missing.")
 
+        # Reset usage before doc extraction
+        reset_global_usage()
+
         document_text_string = await extract_text_from_file(base64_data, file_extension, record_id=test_score_id, extractor=extractor_instance)
 
-        ts_crew = TestScoreVerificationCrewOrchestrator(record_data, document_text_string)
-        report_dict = await asyncio.to_thread(ts_crew.run)
-        
-        if not report_dict:
-            raise ValueError("Crew did not return a valid report.")
+        # Capture doc extraction usage
+        doc_usage = _capture_usage()
+        logger.info(f"Doc extraction usage for {test_score_id}: {doc_usage}")
 
+        # Reset usage before crew processing
+        reset_global_usage()
+
+        # LangGraph Execution
+        logger.info(f"Using LangGraph for {readable_name} {test_score_id}")
+        from app.langgraph.test_score_graph import TestScoreGraphOrchestrator
+        ts_orchestrator = TestScoreGraphOrchestrator(record_data, document_text_string)
+        report_dict = await asyncio.to_thread(ts_orchestrator.run)
+
+        if not report_dict:
+            raise ValueError("Graph execution did not return a valid report.")
+
+        # Capture processing usage
+        crew_usage = _capture_usage()
+        logger.info(f"Graph processing usage for {test_score_id}: {crew_usage}")
+
+        # Log detailed usage to job logger
+        job_logger = get_job_logger()
         name_suffix = record_data.get('RecordTypeName__c') or item_index or test_score_id
+        job_logger.add_detailed_record_log(
+            record_type=f"TestScore_{name_suffix}",
+            doc_usage=doc_usage,
+            crew_usage=crew_usage,
+            status="completed"
+        )
+
         summary_name = f"Test Score Analysis ({name_suffix})"
         
         # Normal processing results
@@ -143,12 +210,48 @@ async def process_single_test_score_detail(
         logger.info(f"Successfully processed {readable_name} {test_score_id}. AVS ID: {summary_id}")
 
     except SalesforceAPIError as e:
-        if '500 Server Error' in str(e):
+        error_msg = str(e)
+        job_logger = get_job_logger()
+        rt = f"TestScore_{test_score_id}"
+        if 'record_data' in locals():
+            rt = f"TestScore_{record_data.get('RecordTypeName__c') or item_index or test_score_id}"
+        job_logger.add_detailed_record_log(
+            record_type=rt,
+            doc_usage=_capture_usage(),
+            crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "error"},
+            status="failed",
+            error=error_msg
+        )
+        if '500 Server Error' in error_msg:
             reason = "Data provider failed. This is likely due to a missing document or invalid data on the Salesforce record. Please verify the record and its attachments."
             raise ValueError(_format_error(test_score_id, "Salesforce Data", reason, str(e)))
         else:
             raise ValueError(_format_error(test_score_id, "Salesforce API", "An API error occurred", str(e)))
     except DocumentExtractionError as e:
+        error_msg = str(e)
+        job_logger = get_job_logger()
+        rt = f"TestScore_{test_score_id}"
+        if 'record_data' in locals():
+            rt = f"TestScore_{record_data.get('RecordTypeName__c') or item_index or test_score_id}"
+        job_logger.add_detailed_record_log(
+            record_type=rt,
+            doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "failed"},
+            crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+            status="failed",
+            error=error_msg
+        )
         raise ValueError(_format_error(test_score_id, "Document Extraction", "Failed to extract text from document", str(e)))
     except Exception as e:
+        error_msg = str(e)
+        job_logger = get_job_logger()
+        rt = f"TestScore_{test_score_id}"
+        if 'record_data' in locals():
+            rt = f"TestScore_{record_data.get('RecordTypeName__c') or item_index or test_score_id}"
+        job_logger.add_detailed_record_log(
+            record_type=rt,
+            doc_usage=_capture_usage(),
+            crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "error"},
+            status="failed",
+            error=error_msg
+        )
         raise ValueError(_format_error(test_score_id, "Processing", "An unexpected error occurred", str(e)))

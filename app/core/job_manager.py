@@ -86,7 +86,7 @@ class JobManager:
                 del self._active_jobs[job.application_id]
                 logger.info(f"Job {job.job_id} finalized and removed from active memory.")
 
-    async def update_status(self, application_id: str, job_id: str, status: str, sf_service: SalesforceService, message: Optional[str] = None, progress: Optional[Dict[str, Any]] = None):
+    async def update_status(self, application_id: str, job_id: str, status: str, sf_service: SalesforceService, message: Optional[str] = None, progress: Optional[Dict[str, Any]] = None, logs: Optional[str] = None):
         async with self._lock:
             job = self._active_jobs.get(application_id)
             if not job or job.job_id != job_id or job.is_stale:
@@ -104,7 +104,8 @@ class JobManager:
             application_id=job.application_id,
             status=job.status,
             message=job.message,
-            progress_details=json.dumps(job.progress) if job.progress else None
+            progress_details=json.dumps(job.progress) if job.progress else None,
+            logs=logs
         )
 
     async def get_job_status(self, application_id: str, sf_service: SalesforceService) -> Optional[Dict[str, Any]]:

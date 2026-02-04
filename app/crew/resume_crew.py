@@ -63,6 +63,7 @@ class ResumeVerificationCrewOrchestrator:
             tasks=[screen_task],
             process=Process.sequential,
             verbose=2,
+            cache=False
         )
 
         result = crew.kickoff()
