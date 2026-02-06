@@ -11,7 +11,7 @@ from app.config import (
 )
 from app.core.processing_utils import should_skip_processing
 from app.core.job_run_logger import get_job_logger
-from app.crew.crew_utils import reset_global_usage, get_job_cost_summary
+from app.langgraph.llm_utils import reset_global_usage, get_job_cost_summary
 from app.services.document_extraction_service import DocumentExtractionError
 from app.services.salesforce_service import SalesforceAPIError
 
@@ -76,7 +76,7 @@ async def process_single_employment_detail(
             skip, reason = should_skip_processing(
                 existing_avs=existing_avs,
                 record_last_modified=record_data.get("LastModifiedDate"),
-                document_last_modified=document_payload.get("LastModifiedDate") if document_payload else None
+                document_last_modified=document_payload.get("lastModifiedDate") if document_payload else None  # Apex returns lowercase 'l'
             )
             if skip:
                 logger.info(f"Skipping {readable_name} {employment_log_id}: {reason}")

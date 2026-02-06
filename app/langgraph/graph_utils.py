@@ -10,10 +10,8 @@ from app.config import (
     MODEL_HTML_SYNTHESIS,
     TEMP_HTML_SYNTHESIS
 )
-# Reuse the existing interceptor-friendly LLM init from crew_utils
-# but we might want a localized version if we need specific graph behavior.
-# For now, reusing the consistent app-wide initializer is best.
-from app.crew.crew_utils import initialize_llm, clean_and_extract_json
+# Reuse the existing interceptor-friendly LLM init from llm_utils
+from app.langgraph.llm_utils import initialize_llm, clean_and_extract_json
 
 logger = logging.getLogger(__name__)
 

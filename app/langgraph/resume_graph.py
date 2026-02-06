@@ -80,7 +80,7 @@ class ResumeGraphOrchestrator:
             raise ValueError("Resume Graph failed to produce final report.")
             
         # Replicate Usage Metrics
-        from app.crew.crew_utils import _GLOBAL_TOKEN_USAGE
+        from app.langgraph.llm_utils import _GLOBAL_TOKEN_USAGE
         usage_metrics = {
             "total_tokens": _GLOBAL_TOKEN_USAGE["total_tokens"],
             "prompt_tokens": _GLOBAL_TOKEN_USAGE["prompt_tokens"],

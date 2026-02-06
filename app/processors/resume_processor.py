@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 from app.config import DCI_OBJECT_API_NAME, READABLE_OBJECT_NAMES
 from app.core.processing_utils import should_skip_processing
 from app.core.job_run_logger import get_job_logger
-from app.crew.crew_utils import reset_global_usage, get_job_cost_summary
+from app.langgraph.llm_utils import reset_global_usage, get_job_cost_summary
 from app.services.document_extraction_service import DocumentExtractionError
 from app.services.salesforce_service import SalesforceAPIError
 
@@ -70,6 +70,16 @@ async def process_single_resume_detail(
         )
         if skip:
             logger.info(f"Skipping {readable_name} {resume_dci_id}: {reason}")
+
+            # Log skipped status
+            job_logger = get_job_logger()
+            job_logger.add_detailed_record_log(
+                record_type="Resume_Detail",
+                doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                status="skipped",
+                error=reason
+            )
             return f"Skipped {readable_name} - already 100% verified with no changes."
 
         if not document_payload:
@@ -134,13 +144,19 @@ async def process_single_resume_detail(
             task_id=None,
             dci_id=resume_dci_id
         )
-        
+
+        # Touch AVS to ensure its LastModifiedDate > DCI's LastModifiedDate
+        # This is critical for skip logic to work correctly on subsequent runs
+        await asyncio.to_thread(sf_service.touch_verification_summary, summary_record_id)
+
         logger.info(f"Successfully processed {readable_name} {resume_dci_id}. AVS ID: {summary_record_id}")
         return f"Successfully processed resume {resume_dci_id}."
 
     except SalesforceAPIError as e:
+        error_msg = str(e)
+        job_logger = get_job_logger()
         # Check if this is a missing document error (no ContentDocumentLink found)
-        if "Could not find any ContentDocumentLink" in str(e):
+        if "Could not find any ContentDocumentLink" in error_msg:
             logger.warning(f"No document attached to resume DCI {resume_dci_id}, creating fallback AVS")
             summary_record_id = await asyncio.to_thread(
                 sf_service.upsert_verification_summary,
@@ -151,14 +167,53 @@ async def process_single_resume_detail(
                 confidence_range="0",
                 mismatched_field_list=None
             )
+            job_logger.add_detailed_record_log(
+                record_type="Resume_Detail",
+                doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                status="failed",
+                error="No document attached to this record"
+            )
             logger.info(f"Created fallback AVS for resume {resume_dci_id}. AVS ID: {summary_record_id}")
             return f"Processed {readable_name} with no document fallback."
-        elif '500 Server Error' in str(e):
+        elif '500 Server Error' in error_msg:
+            job_logger.add_detailed_record_log(
+                record_type="Resume_Detail",
+                doc_usage=_capture_usage(),
+                crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "error"},
+                status="failed",
+                error=error_msg
+            )
             reason = "Data provider failed. This is likely due to a missing document or invalid data on the Salesforce record. Please verify the record and its attachments."
-            raise ValueError(_format_error(resume_dci_id, "Salesforce Data", reason, str(e)))
+            raise ValueError(_format_error(resume_dci_id, "Salesforce Data", reason, error_msg))
         else:
-            raise ValueError(_format_error(resume_dci_id, "Salesforce API", "An API error occurred", str(e)))
+            job_logger.add_detailed_record_log(
+                record_type="Resume_Detail",
+                doc_usage=_capture_usage(),
+                crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "error"},
+                status="failed",
+                error=error_msg
+            )
+            raise ValueError(_format_error(resume_dci_id, "Salesforce API", "An API error occurred", error_msg))
     except DocumentExtractionError as e:
-        raise ValueError(_format_error(resume_dci_id, "Document Extraction", "Failed to extract text from document", str(e)))
+        error_msg = str(e)
+        job_logger = get_job_logger()
+        job_logger.add_detailed_record_log(
+            record_type="Resume_Detail",
+            doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "failed"},
+            crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+            status="failed",
+            error=error_msg
+        )
+        raise ValueError(_format_error(resume_dci_id, "Document Extraction", "Failed to extract text from document", error_msg))
     except Exception as e:
-        raise ValueError(_format_error(resume_dci_id, "Processing", "An unexpected error occurred", str(e)))
+        error_msg = str(e)
+        job_logger = get_job_logger()
+        job_logger.add_detailed_record_log(
+            record_type="Resume_Detail",
+            doc_usage=_capture_usage(),
+            crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "error"},
+            status="failed",
+            error=error_msg
+        )
+        raise ValueError(_format_error(resume_dci_id, "Processing", "An unexpected error occurred", error_msg))

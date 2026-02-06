@@ -55,8 +55,7 @@ class ProcessManager:
         sf_config: Dict[str, str],
         prefetched_data: Dict[str, Any],
         timeout_seconds: Optional[int] = None,
-        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
-        existing_logs: Optional[str] = None
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
     ) -> Dict[str, Any]:
         """
         Execute a job in an isolated worker process.
@@ -74,6 +73,10 @@ class ProcessManager:
         Raises:
             WorkerProcessError: If worker fails to spawn or execute
             asyncio.TimeoutError: If worker exceeds timeout
+
+        Note:
+            Worker fetches existing logs from Salesforce at completion time.
+            This ensures logs are never cleared during intermediate updates.
         """
         # Use provided timeout or fall back to configured default (14 minutes)
         timeout = timeout_seconds if timeout_seconds is not None else JOB_TIMEOUT_SECONDS
@@ -81,12 +84,12 @@ class ProcessManager:
         logger.info(f"Spawning worker process for job {job_id} (timeout: {timeout}s / {timeout/60:.1f} minutes)")
 
         # Prepare job data for worker
+        # Note: existing_logs not passed - worker fetches at completion time
         job_data = {
             'job_id': job_id,
             'application_id': application_id,
             'sf_config': sf_config,
-            'prefetched_data': prefetched_data,
-            'existing_logs': existing_logs
+            'prefetched_data': prefetched_data
         }
 
         # Spawn worker process

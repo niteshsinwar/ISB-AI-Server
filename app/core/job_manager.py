@@ -26,6 +26,7 @@ class Job(BaseModel):
     last_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     progress: Dict[str, Any] = {}
     is_stale: bool = False
+    logs: Optional[str] = None  # Store existing logs for retry logic
 
 class JobManager:
     def __init__(self):
@@ -33,23 +34,43 @@ class JobManager:
         self._lock = asyncio.Lock()
 
     async def create_job(self, application_id: str, client_fingerprint: str, sf_service: SalesforceService) -> Job:
+        """
+        Create a new job for an application.
+
+        LOGGING STRATEGY:
+        - Existing logs are fetched and preserved during initial job creation
+        - During processing: NO logs DML - logs field is OMITTED from updates
+        - At job completion: Worker fetches fresh logs, appends new attempt, and saves
+        - This ensures logs are NEVER accidentally cleared
+        """
         stale_job_id: Optional[str] = None
 
         org_alias = getattr(sf_service, "org_alias", None)
+
+        # Fetch existing logs to preserve them during the initial "queued" status upsert
+        existing_job_data = await sf_service.get_latest_ai_server_job(application_id)
+        existing_logs = existing_job_data.get("logs") if existing_job_data else None
 
         async with self._lock:
             if application_id in self._active_jobs:
                 stale_job = self._active_jobs[application_id]
                 stale_job.is_stale = True
                 stale_job_id = stale_job.job_id
-            
-            new_job = Job(application_id=application_id, client_fingerprint=client_fingerprint, org_alias=org_alias)
-            
+
+            new_job = Job(
+                application_id=application_id,
+                client_fingerprint=client_fingerprint,
+                org_alias=org_alias,
+                logs=existing_logs  # Store for reference (not passed to worker)
+            )
+
+            # Initial upsert preserves existing logs by explicitly including them
             sf_job_id = await sf_service.upsert_ai_server_job(
                 job_id=new_job.job_id,
                 application_id=new_job.application_id,
                 status=new_job.status,
-                client_fingerprint=new_job.client_fingerprint
+                client_fingerprint=new_job.client_fingerprint,
+                logs=existing_logs  # Preserve existing logs during initial record update
             )
             if not sf_job_id:
                 raise RuntimeError("Failed to create initial job record in Salesforce.")
@@ -62,7 +83,7 @@ class JobManager:
             await process_manager.kill_job_worker(stale_job_id)
             logger.info(f"Marked stale and terminated previous job {stale_job_id} for App {application_id}")
 
-        logger.info(f"Created job {new_job.job_id} for App {application_id} in org {sf_service.instance_url}")
+        logger.info(f"Created job {new_job.job_id} for App {application_id} in org {sf_service.instance_url}. Hydrated logs: {bool(existing_logs)}")
         return new_job
 
     async def begin_processing(self, job: Job, sf_service: SalesforceService):

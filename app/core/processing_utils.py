@@ -30,32 +30,24 @@ def should_skip_processing(
     document_last_modified: Optional[str],
 ) -> tuple[bool, str]:
     """
-    Determine if processing should be skipped based on AVS status and modification dates.
-
-    Skip conditions (OR logic):
-    1. Confidence = 100% (already fully verified)
-    2. OR both record and document were modified BEFORE AVS date (no changes since last analysis)
-
-    Args:
-        existing_avs: Dict with 'LastModifiedDate' and 'Percentage_Confidence__c' from AVS query
-        record_last_modified: LastModifiedDate of the child record (from Apex response)
-        document_last_modified: LastModifiedDate of the document/ContentVersion (from Apex response)
-
-    Returns:
-        Tuple of (should_skip: bool, reason: str)
+    Skip if:
+    1. Confidence = 100, OR
+    2. AVS is newer than BOTH child record AND document
     """
-    # No existing AVS - must process
+    # DEBUG: Log all input values
+    logger.info(f"[SKIP_DEBUG] AVS={existing_avs}, record_date={record_last_modified}, doc_date={document_last_modified}")
+
     if not existing_avs:
         return False, "no_existing_avs"
 
-    avs_date_str = existing_avs.get('LastModifiedDate')
     confidence = existing_avs.get('Percentage_Confidence__c')
+    avs_date_str = existing_avs.get('LastModifiedDate')
 
-    # Condition 1: Skip if confidence is 100% (already fully verified)
+    # Condition 1: confidence = 100
     if confidence == '100' or confidence == 100:
-        return True, f"confidence_100% (avs_date: {avs_date_str})"
+        return True, f"confidence_100%"
 
-    # Condition 2: Skip if no changes since last analysis (both dates < AVS date)
+    # Condition 2: AVS newer than both record and doc
     avs_date = parse_sf_datetime(avs_date_str)
     if not avs_date:
         return False, "avs_date_missing"
@@ -63,28 +55,13 @@ def should_skip_processing(
     record_date = parse_sf_datetime(record_last_modified)
     doc_date = parse_sf_datetime(document_last_modified)
 
-    # If we don't have both dates, we can't safely compare - must process
-    # (Missing date info means we can't confirm nothing changed)
-    if record_date is None and doc_date is None:
-        return False, "missing_date_info_for_comparison"
+    # AVS must be newer than record (if record date exists)
+    if record_date and record_date > avs_date:
+        return False, f"record_modified_after_avs"
 
-    # Check if record was modified after AVS
-    # If record_date is None but doc_date exists, only check doc
-    # If record_date exists, it must be <= avs_date to be "unchanged"
-    record_unchanged = (record_date is None) or (record_date <= avs_date)
+    # AVS must be newer than doc (if doc date exists)
+    if doc_date and doc_date > avs_date:
+        return False, f"doc_modified_after_avs"
 
-    # Check if document was modified after AVS
-    # If doc_date is None but record_date exists, only check record
-    # If doc_date exists, it must be <= avs_date to be "unchanged"
-    doc_unchanged = (doc_date is None) or (doc_date <= avs_date)
-
-    if record_unchanged and doc_unchanged:
-        return True, f"no_changes_since_last_analysis (confidence: {confidence}, avs_date: {avs_date_str})"
-
-    # Changes detected - must reprocess
-    if not record_unchanged:
-        return False, f"record_modified_after_avs (record: {record_last_modified}, avs: {avs_date_str})"
-    if not doc_unchanged:
-        return False, f"document_modified_after_avs (doc: {document_last_modified}, avs: {avs_date_str})"
-
-    return False, "unknown"
+    # AVS is newer than both - skip
+    return True, f"avs_newer_than_record_and_doc"

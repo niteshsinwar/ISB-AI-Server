@@ -8,7 +8,6 @@ from app.config import (
     MODEL_COMPLEX_REASONING, TEMP_COMPLEX_REASONING,
     MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS
 )
-from app.crew.crew_utils import get_crew_usage_metrics
 from app.langgraph.graph_prompts import (
     EDUCATION_DATA_COMPARATOR_AGENT_GOAL,
     EDUCATION_DATA_COMPARATOR_AGENT_BACKSTORY,
@@ -139,7 +138,7 @@ class EducationGraphOrchestrator:
             raise ValueError("Graph execution failed to produce final report.")
             
         # Replicate Usage Metrics
-        from app.crew.crew_utils import _GLOBAL_TOKEN_USAGE
+        from app.langgraph.llm_utils import _GLOBAL_TOKEN_USAGE
         usage_metrics = {
             "total_tokens": _GLOBAL_TOKEN_USAGE["total_tokens"],
             "prompt_tokens": _GLOBAL_TOKEN_USAGE["prompt_tokens"],

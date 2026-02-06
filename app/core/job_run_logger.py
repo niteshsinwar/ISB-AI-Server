@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field, asdict
 
-from app.crew.crew_utils import get_job_cost_summary, reset_global_usage
+from app.langgraph.llm_utils import get_job_cost_summary, reset_global_usage
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class DetailedRecordLog:
     Detailed token usage log for a record with separate doc extraction and crew costs.
 
     This captures:
-    - Document extraction (OCR): Uses vision model (gemini-2.5-pro) for image/PDF processing
+    - Document extraction (OCR): Uses vision model (gemini-2.5-flash) for image/PDF processing
     - Crew processing: Uses text model (gemini-2.5-flash) for verification analysis
     """
     record_type: str
@@ -145,6 +145,8 @@ class JobRunLogger:
                     )
                     self._attempts.append(attempt)
                 logger.info(f"Loaded {len(self._attempts)} existing attempt(s) from logs")
+                # Important: Update the current retry count based on loaded attempts
+                # The next attempt started will be len(self._attempts) + 1
                 return len(self._attempts)
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse existing logs JSON: {e}")
@@ -358,6 +360,8 @@ class JobRunLogger:
     def get_latest_attempt_summary(self) -> Optional[Dict[str, Any]]:
         """
         Get a summary of the latest attempt for quick reference.
+        Handles both old format (input_token/output_token/cost) and
+        new detailed format (doc_input/doc_output/crew_input/crew_output/total_cost).
 
         Returns:
             Dictionary with attempt summary or None if no attempts
@@ -366,9 +370,23 @@ class JobRunLogger:
             return None
 
         latest = self._attempts[-1]
-        total_input = sum(r.get("input_token", 0) for r in latest.records)
-        total_output = sum(r.get("output_token", 0) for r in latest.records)
-        total_cost = sum(r.get("cost", 0) for r in latest.records)
+
+        # Calculate totals supporting both old and new log formats
+        total_input = 0
+        total_output = 0
+        total_cost = 0
+
+        for r in latest.records:
+            # New detailed format (doc + crew)
+            if "doc_input" in r or "crew_input" in r:
+                total_input += r.get("doc_input", 0) + r.get("crew_input", 0)
+                total_output += r.get("doc_output", 0) + r.get("crew_output", 0)
+                total_cost += r.get("total_cost", 0)
+            # Old simple format
+            else:
+                total_input += r.get("input_token", 0)
+                total_output += r.get("output_token", 0)
+                total_cost += r.get("cost", 0)
 
         return {
             "attempt_number": latest.count,

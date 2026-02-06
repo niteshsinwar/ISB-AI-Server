@@ -128,39 +128,37 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
                     progress=initial_progress
                 )
 
-            # Fetch existing logs for persistence across API triggers
-            existing_job_record = await sf_service.get_latest_ai_server_job(job.application_id)
-            existing_logs = existing_job_record.get('logs') if existing_job_record else None
-
+            # Worker now fetches existing logs at completion time and merges them
+            # This ensures logs are NEVER cleared during intermediate updates
             result = await process_manager.execute_job_in_worker(
                 job_id=job.job_id,
                 application_id=job.application_id,
                 sf_config=sf_config,
                 prefetched_data=prefetched_data,
-                progress_callback=handle_progress_update,
-                existing_logs=existing_logs
+                progress_callback=handle_progress_update
+                # Note: existing_logs no longer passed - worker fetches at completion
             )
 
             final_status = result.get("status", "completed")
             final_message = result.get("message") or "All verification tasks completed successfully."
             progress = result.get("progress")
-            # Extract logs from worker result and pass to update_status to prevent overwrite
-            worker_logs = result.get("logs")
-            logs_json = json.dumps(worker_logs) if worker_logs else None
-            
-            if logs_json:
-                logger.info(f"Passing logs to JobManager for final update (len={len(logs_json)})")
-            else:
-                logger.warning("No logs received from worker to pass to JobManager!")
 
+            # Log confirmation - worker already saved logs to Salesforce
+            worker_logs = result.get("logs")
+            if worker_logs:
+                logger.info(f"Worker completed with {len(worker_logs)} log attempt(s)")
+            else:
+                logger.warning("Worker did not return log data")
+
+            # Final status update - NO logs parameter needed, worker already saved them
             await job_manager.update_status(
                 job.application_id,
                 job.job_id,
                 final_status,
                 sf_service,
                 message=final_message,
-                progress=progress,
-                logs=logs_json
+                progress=progress
+                # logs NOT passed - worker already saved merged logs to Salesforce
             )
         except WorkerProcessError as e:
             error_message = f"Worker process error: {e}"

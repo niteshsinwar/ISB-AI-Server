@@ -11,7 +11,7 @@ from app.config import (
 )
 from app.core.processing_utils import should_skip_processing
 from app.core.job_run_logger import get_job_logger
-from app.crew.crew_utils import reset_global_usage, get_job_cost_summary
+from app.langgraph.llm_utils import reset_global_usage, get_job_cost_summary
 from app.services.document_extraction_service import DocumentExtractionError
 from app.services.salesforce_service import SalesforceAPIError
 
@@ -74,7 +74,7 @@ async def process_single_test_score_detail(
         skip, reason = should_skip_processing(
             existing_avs=existing_avs,
             record_last_modified=record_data.get("LastModifiedDate"),
-            document_last_modified=document_payload.get("LastModifiedDate") if document_payload else None
+            document_last_modified=document_payload.get("lastModifiedDate") if document_payload else None  # Apex returns lowercase 'l'
         )
         if skip:
             logger.info(f"Skipping {readable_name} {test_score_id}: {reason}")
@@ -136,7 +136,9 @@ async def process_single_test_score_detail(
             )
             
             logger.info(f"Successfully processed Online {readable_name} {test_score_id}. AVS ID: {summary_id}")
-            
+
+            # Initialize job_logger for Online test mode logging
+            job_logger = get_job_logger()
             job_logger.add_detailed_record_log(
                 record_type=f"TestScore_{name_suffix}",
                 doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},

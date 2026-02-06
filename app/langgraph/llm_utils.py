@@ -63,19 +63,6 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int, model_name: str) 
         }
     }
 
-# from langchain.callbacks.base import BaseCallbackHandler
-# from langchain.schema import LLMResult
-
-# Global usage accumulator
-_GLOBAL_TOKEN_USAGE = {
-    "prompt_tokens": 0,
-    "completion_tokens": 0,
-    "total_tokens": 0,
-    "successful_requests": 0,
-    "total_cost_usd": 0.0,
-    "cost_breakdown": []
-}
-
 # Store original request method
 _original_request = requests.Session.request
 
@@ -95,11 +82,14 @@ def _intercept_google_usage(self, method, url, *args, **kwargs):
             try:
                 data = response.json()
                 usage = None
-                # Basic model extraction from URL/args could be improved, but this works for now
-                model_name = "gemini-pro"
-                if "gemini-1.5-flash" in url: model_name = "gemini-1.5-flash"
-                elif "gemini-1.5-pro" in url: model_name = "gemini-1.5-pro"
-                elif "gemini-2.5-flash" in url: model_name = "gemini-2.5-flash"
+                # Extract model name from URL - supports all Gemini model versions
+                # Order matters: check more specific patterns first
+                # STRICT POLICY: Only support Gemini 2.5 Flash
+                # Default to 2.5 flash, verify if URL matches (it should)
+                model_name = "gemini-2.5-flash"
+                if "gemini-2.5-flash" not in url:
+                    # Log warning but proceed as 2.5 flash (or could be 2.5-flash-lite)
+                    pass
 
                 # Handle streaming response (returns a list of chunks)
                 if isinstance(data, list):
@@ -113,28 +103,73 @@ def _intercept_google_usage(self, method, url, *args, **kwargs):
                     usage = data.get("usageMetadata", {})
 
                 if usage:
-                    p_tokens = usage.get("promptTokenCount", 0)
-                    c_tokens = usage.get("candidatesTokenCount", 0)
-                    total = usage.get("totalTokenCount", 0)
-                    
-                    # Calculate cost for this request
-                    cost_info = calculate_cost(p_tokens, c_tokens, model_name)
+                    # DEBUG: Log FULL raw usageMetadata from Gemini for validation
+                    logger.info(f"[GEMINI_RAW_USAGE] Full usageMetadata: {json.dumps(usage, indent=2)}")
 
-                    logger.info(f"[Network Interceptor] Captured "
-                               f"[{model_name}]: {p_tokens} prompt, {c_tokens} completion "
-                               f"| Cost: ${cost_info['total_cost']:.6f}")
+                    # Known fields per ACTUAL Gemini API response (validated 2026-02-06):
+                    # Total = promptTokenCount + candidatesTokenCount + thoughtsTokenCount
+                    # candidatesTokenCount does NOT include thinking - they are separate
+                    known_fields = {
+                        'promptTokenCount',           # Input tokens (text + images combined)
+                        'candidatesTokenCount',       # Output tokens (NOT including thinking)
+                        'totalTokenCount',            # prompt + candidates + thoughts
+                        'thoughtsTokenCount',         # Thinking/reasoning tokens (SEPARATE from candidates)
+                        'cachedContentTokenCount',    # Cached content tokens
+                        'toolUsePromptTokenCount',    # Tool use tokens
+                        'promptTokensDetails',        # Breakdown by modality [{modality:1=text,2=image, tokenCount}]
+                        'cacheTokensDetails',         # Cached breakdown by modality
+                    }
+                    actual_fields = set(usage.keys())
+                    unknown_fields = actual_fields - known_fields
+                    if unknown_fields:
+                        logger.warning(f"[GEMINI_RAW_USAGE] UNKNOWN FIELDS DETECTED: {unknown_fields}")
+
+                    p_tokens = usage.get("promptTokenCount", 0)
+                    c_tokens = usage.get("candidatesTokenCount", 0)  # Output only, NOT including thinking
+                    total = usage.get("totalTokenCount", 0)
+                    thinking_tokens = usage.get("thoughtsTokenCount", 0)  # Thinking tokens (SEPARATE)
+                    cached_tokens = usage.get("cachedContentTokenCount", 0)
+                    tool_tokens = usage.get("toolUsePromptTokenCount", 0)
+
+                    # Extract modality breakdown for detailed logging
+                    prompt_details = usage.get("promptTokensDetails", [])
+                    text_input = sum(d.get("tokenCount", 0) for d in prompt_details if d.get("modality") == 1)
+                    image_input = sum(d.get("tokenCount", 0) for d in prompt_details if d.get("modality") == 2)
+
+                    # Validate: total = prompt + candidates + thoughts (verified against actual API)
+                    expected_total = p_tokens + c_tokens + thinking_tokens
+                    if total != expected_total and total > 0:
+                        logger.warning(f"[GEMINI_RAW_USAGE] TOTAL MISMATCH: reported={total}, calculated={expected_total} "
+                                      f"(prompt={p_tokens}, candidates={c_tokens}, thoughts={thinking_tokens})")
+
+                    # For cost: prompt (input) + candidates + thinking (output)
+                    # Thinking tokens are billed at output rate per Google pricing
+                    total_output = c_tokens + thinking_tokens
+                    cost_info = calculate_cost(p_tokens, total_output, model_name)
+
+                    # Detailed logging with modality breakdown
+                    modality_info = f"[text={text_input}, image={image_input}]" if prompt_details else ""
+                    logger.info(f"[Network Interceptor] Captured [{model_name}]: "
+                               f"prompt={p_tokens}{modality_info}, candidates={c_tokens}, thoughts={thinking_tokens}, cached={cached_tokens} "
+                               f"| Total={total} | Cost: ${cost_info['total_cost']:.6f}")
 
                     # Use global variable directly
                     _GLOBAL_TOKEN_USAGE["prompt_tokens"] += p_tokens
-                    _GLOBAL_TOKEN_USAGE["completion_tokens"] += c_tokens
+                    _GLOBAL_TOKEN_USAGE["completion_tokens"] += total_output  # candidates + thinking
                     _GLOBAL_TOKEN_USAGE["total_tokens"] += total
                     _GLOBAL_TOKEN_USAGE["successful_requests"] += 1
                     _GLOBAL_TOKEN_USAGE["total_cost_usd"] += cost_info["total_cost"]
                     _GLOBAL_TOKEN_USAGE["cost_breakdown"].append({
                         "model": model_name,
                         "prompt_tokens": p_tokens,
-                        "completion_tokens": c_tokens,
-                        "total_cost": cost_info["total_cost"]
+                        "prompt_text_tokens": text_input,      # Text portion of input
+                        "prompt_image_tokens": image_input,    # Image portion of input (258 per tile)
+                        "candidates_tokens": c_tokens,         # Output (NOT including thinking)
+                        "thinking_tokens": thinking_tokens,    # Thinking/reasoning tokens
+                        "cached_tokens": cached_tokens,
+                        "total_output": total_output,          # candidates + thinking (billable output)
+                        "total_cost": cost_info["total_cost"],
+                        "gemini_total": total                  # Gemini's reported total for validation
                     })
             except Exception:
                 pass # Silent fail on parsing if not JSON

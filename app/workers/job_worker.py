@@ -4,6 +4,11 @@ Each job runs in a separate process - when process terminates, ALL resources are
 This guarantees ABSOLUTE zero memory/thread leakage.
 
 NO resource manager needed - OS kernel cleanup is absolute.
+
+LOGGING STRATEGY:
+- During processing: Track all token/cost data in memory only (NO logs DML)
+- At job completion: Fetch existing logs from SF, append new attempt, upsert
+- This ensures logs are NEVER cleared during intermediate status updates
 """
 
 import sys
@@ -70,6 +75,21 @@ def _emit_progress_update(progress: Optional[Dict[str, Any]]):
     _emit_json({"type": "progress", "progress": snapshot})
 
 
+async def _fetch_existing_logs(sf_service, application_id: str) -> Optional[str]:
+    """
+    Fetch existing logs from Salesforce at job completion time.
+    This ensures we always get the freshest data before appending.
+    """
+    try:
+        job_data = await sf_service.get_latest_ai_server_job(application_id)
+        if job_data:
+            return job_data.get("logs")
+        return None
+    except Exception as e:
+        logger.warning(f"Could not fetch existing logs for {application_id}: {e}")
+        return None
+
+
 async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Execute a complete job in this isolated process.
@@ -90,11 +110,10 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
 
     logger.info(f"Worker process {os.getpid()} starting job {job_id} for application {application_id}")
 
-    # Initialize job run logger for this attempt
+    # Initialize job run logger for this attempt - start fresh, we'll merge with existing logs at completion
+    # This is the correct pattern: track usage in memory during job, merge at the end
     job_logger = reset_job_logger()
-    existing_logs_json = job_data.get('existing_logs')
-    job_logger.load_existing_logs(existing_logs_json)
-    job_logger.start_attempt()
+    job_logger.start_attempt()  # Start counting from 1, will be adjusted at completion
 
     try:
         # Import dependencies (fresh in this process)
@@ -224,18 +243,48 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
             )
             _emit_progress_update(progress)
 
-        # Finalize attempt as successful
-        job_logger.finalize_attempt(status="success")
-        logs_json = job_logger.get_logs_json()
+        # JOB COMPLETION - Now fetch existing logs, merge, and save
+        # This is the ONLY place where logs field is updated
+        logger.info(f"Worker {os.getpid()}: Job {job_id} processing complete. Fetching existing logs for merge...")
 
-        # All processing complete - save logs to Salesforce
+        # Fetch existing logs from Salesforce (fresh query at completion time)
+        existing_logs_json = await _fetch_existing_logs(sf_service, application_id)
+        existing_count = 0
+        if existing_logs_json:
+            try:
+                existing_logs = json.loads(existing_logs_json)
+                existing_count = len(existing_logs) if isinstance(existing_logs, list) else 0
+                logger.info(f"Worker {os.getpid()}: Found {existing_count} existing log attempt(s)")
+            except json.JSONDecodeError:
+                logger.warning(f"Worker {os.getpid()}: Could not parse existing logs, starting fresh")
+                existing_logs = []
+        else:
+            existing_logs = []
+            logger.info(f"Worker {os.getpid()}: No existing logs found, this is attempt #1")
+
+        # Finalize current attempt with correct count
+        job_logger.finalize_attempt(status="success")
+
+        # Get current attempt data and adjust its count
+        current_attempt = job_logger.get_logs_dict()
+        if current_attempt:
+            # Adjust the count to be existing_count + 1
+            current_attempt[0]["count"] = existing_count + 1
+
+        # Merge: existing logs + current attempt
+        merged_logs = existing_logs + current_attempt
+        merged_logs_json = json.dumps(merged_logs, ensure_ascii=False)
+
+        logger.info(f"Worker {os.getpid()}: Merged logs - now {len(merged_logs)} total attempt(s)")
+
+        # All processing complete - save merged logs to Salesforce
         await sf_service.upsert_ai_server_job(
             job_id=job_id,
             application_id=application_id,
             status="completed",
             message="All verification tasks completed successfully.",
             progress_details=json.dumps(progress),
-            logs=logs_json
+            logs=merged_logs_json
         )
         _emit_progress_update(progress)
 
@@ -247,27 +296,51 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
             "message": "All verification tasks completed successfully.",
             "progress": progress,
             "error": None,
-            "logs": job_logger.get_logs_dict()
+            "logs": merged_logs
         }
 
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Worker {os.getpid()}: Job {job_id} failed: {error_msg}", exc_info=True)
 
-        # Finalize attempt as failed
-        job_logger.finalize_attempt(status="failed", error=error_msg[:500])
-        logs_json = job_logger.get_logs_json()
-
+        # JOB FAILURE - Same pattern: fetch existing logs, merge, and save
+        merged_logs = []
         try:
-            # Try to update Salesforce with error and logs
             if 'sf_service' in locals():
+                # Fetch existing logs from Salesforce
+                existing_logs_json = await _fetch_existing_logs(sf_service, application_id)
+                existing_count = 0
+                if existing_logs_json:
+                    try:
+                        existing_logs = json.loads(existing_logs_json)
+                        existing_count = len(existing_logs) if isinstance(existing_logs, list) else 0
+                    except json.JSONDecodeError:
+                        existing_logs = []
+                else:
+                    existing_logs = []
+
+                # Finalize current attempt as failed
+                job_logger.finalize_attempt(status="failed", error=error_msg[:500])
+
+                # Get current attempt and adjust count
+                current_attempt = job_logger.get_logs_dict()
+                if current_attempt:
+                    current_attempt[0]["count"] = existing_count + 1
+
+                # Merge logs
+                merged_logs = existing_logs + current_attempt
+                merged_logs_json = json.dumps(merged_logs, ensure_ascii=False)
+
+                logger.info(f"Worker {os.getpid()}: Merged logs on failure - now {len(merged_logs)} total attempt(s)")
+
+                # Update Salesforce with error and merged logs
                 await sf_service.upsert_ai_server_job(
                     job_id=job_id,
                     application_id=application_id,
                     status="failed",
-                    message=error_msg,
+                    message=error_msg[:131072],
                     progress_details=json.dumps(progress) if 'progress' in locals() else None,
-                    logs=logs_json
+                    logs=merged_logs_json
                 )
                 if 'progress' in locals():
                     _emit_progress_update(progress)
@@ -279,7 +352,7 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
             "message": error_msg,
             "progress": progress if 'progress' in locals() else {},
             "error": error_msg,
-            "logs": job_logger.get_logs_dict()
+            "logs": merged_logs
         }
 
 

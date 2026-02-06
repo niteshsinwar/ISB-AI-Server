@@ -144,9 +144,32 @@ class SalesforceService:
             logger.error(f"An unexpected error occurred calling Apex endpoint {full_url}: {e}", exc_info=True)
             raise SalesforceAPIError(f"An unexpected error occurred during Apex call: {e}")
 
+    def _get_field_value_case_insensitive(self, record: Dict[str, Any], field_name: str) -> Any:
+        """
+        Get a field value from a Salesforce record with case-insensitive key matching.
+        Salesforce SOQL is case-insensitive but returns field names with their exact API name casing.
+        """
+        # Direct match first
+        if field_name in record:
+            return record[field_name]
+        # Case-insensitive fallback
+        field_lower = field_name.lower()
+        for key, value in record.items():
+            if key.lower() == field_lower:
+                return value
+        return None
+
     async def upsert_ai_server_job(self, job_id: str, application_id: str, status: str, **kwargs) -> str:
+        """
+        Upsert AI Server Job record.
+
+        IMPORTANT: Logs field is ONLY updated when explicitly passed via kwargs['logs'].
+        During intermediate status updates (processing, progress), logs should NOT be passed
+        to avoid any risk of clearing or overwriting existing logs.
+        Logs are ONLY written at job completion (success or failure).
+        """
         self._ensure_connected()
-        soql = f"SELECT Id, {AIJ_LOGS_FIELD} FROM {AI_SERVER_JOB_OBJECT_API_NAME} WHERE {AIJ_APPLICATION_LOOKUP_FIELD} = '{application_id}' LIMIT 1"
+        soql = f"SELECT Id FROM {AI_SERVER_JOB_OBJECT_API_NAME} WHERE {AIJ_APPLICATION_LOOKUP_FIELD} = '{application_id}' ORDER BY CreatedDate DESC LIMIT 1"
         def do_query():
             # Use lambda to access self.sf at call time, not closure creation time
             return self._call_sf_api_with_retry(lambda: self.sf.query(soql))
@@ -165,30 +188,31 @@ class SalesforceService:
         if message := kwargs.get('message'): payload[AIJ_MESSAGE_FIELD] = message[:131072]
         if progress_details := kwargs.get('progress_details'): payload[AIJ_PROGRESS_FIELD] = progress_details
         if client_fp := kwargs.get('client_fingerprint'): payload[AIJ_CLIENT_FP_FIELD] = client_fp
-        if logs := kwargs.get('logs'):
+
+        # CRITICAL: Only include logs field when explicitly passed.
+        # This ensures logs are ONLY written at job completion, never during intermediate updates.
+        # If logs is None or not passed, the field is completely OMITTED from the update payload,
+        # which means Salesforce will leave the existing value untouched.
+        logs = kwargs.get('logs')
+        if logs is not None and logs:  # Only if explicitly passed and non-empty
             payload[AIJ_LOGS_FIELD] = logs[:131072]
             logger.info(f"Upserting job {job_id}: Included logs payload (len={len(payload[AIJ_LOGS_FIELD])})")
         else:
-            logger.info(f"Upserting job {job_id}: Logs payload NOT included.")
-        
+            logger.debug(f"Upserting job {job_id}: Logs field OMITTED (will not modify existing logs)")
+
         handler = getattr(self.sf, AI_SERVER_JOB_OBJECT_API_NAME)
-        
+
         try:
             if result['totalSize'] > 0:
                 record = result['records'][0]
-                existing_id = record['Id']
+                existing_id = self._get_field_value_case_insensitive(record, 'Id')
                 update_payload = payload.copy()
                 del update_payload[AIJ_APPLICATION_LOOKUP_FIELD]
 
-                # CRITICAL FIX: Preserve existing logs if not receiving new ones.
-                # Salesforce automation appears to clear the field if omitted from update.
-                if AIJ_LOGS_FIELD not in update_payload:
-                    existing_logs = record.get(AIJ_LOGS_FIELD)
-                    # Only include if there's something to preserve (sending None might clear it if it wasn't None, which is fine)
-                    # Actually, if we send None, it might clear it. If we omit, it clears it (per testing).
-                    # So safely sending back what we found is the best bet.
-                    update_payload[AIJ_LOGS_FIELD] = existing_logs
-                    logger.info(f"Preserving existing logs for job {job_id} (len={len(existing_logs) if existing_logs else 0})")
+                # NO preservation logic needed anymore.
+                # If logs weren't passed, AIJ_LOGS_FIELD is not in update_payload,
+                # which means Salesforce will NOT modify the existing logs value.
+                # This is the correct behavior - logs are ONLY updated at job completion.
 
                 def do_update():
                     return self._call_sf_api_with_retry(lambda: handler.update(existing_id, update_payload))
@@ -215,14 +239,20 @@ class SalesforceService:
             result = await asyncio.get_event_loop().run_in_executor(None, do_query)
             if result['totalSize'] > 0:
                 rec = result['records'][0]
-                progress = json.loads(rec.get(AIJ_PROGRESS_FIELD) or '{}')
+                # Use case-insensitive field access to handle Salesforce field name casing variations
+                progress_raw = self._get_field_value_case_insensitive(rec, AIJ_PROGRESS_FIELD) or '{}'
+                progress = json.loads(progress_raw)
                 return {
-                    "job_id": rec.get(AIJ_JOB_ID_FIELD), "application_id": application_id,
-                    "status": rec.get(AIJ_STATUS_FIELD), "message": rec.get(AIJ_MESSAGE_FIELD),
-                    "created_at": rec.get("CreatedDate"), "last_updated_at": rec.get("LastModifiedDate"),
-                    "progress": progress, "salesforce_job_record_id": rec.get("Id"),
-                    "client_fingerprint": rec.get(AIJ_CLIENT_FP_FIELD),
-                    "logs": rec.get(AIJ_LOGS_FIELD)
+                    "job_id": self._get_field_value_case_insensitive(rec, AIJ_JOB_ID_FIELD),
+                    "application_id": application_id,
+                    "status": self._get_field_value_case_insensitive(rec, AIJ_STATUS_FIELD),
+                    "message": self._get_field_value_case_insensitive(rec, AIJ_MESSAGE_FIELD),
+                    "created_at": self._get_field_value_case_insensitive(rec, "CreatedDate"),
+                    "last_updated_at": self._get_field_value_case_insensitive(rec, "LastModifiedDate"),
+                    "progress": progress,
+                    "salesforce_job_record_id": self._get_field_value_case_insensitive(rec, "Id"),
+                    "client_fingerprint": self._get_field_value_case_insensitive(rec, AIJ_CLIENT_FP_FIELD),
+                    "logs": self._get_field_value_case_insensitive(rec, AIJ_LOGS_FIELD)
                 }
             return None # It's correct to return None if no job is found.
         except Exception as e:
@@ -283,6 +313,32 @@ class SalesforceService:
             except Exception as e:
                 logger.error(f"Failed to update DocumentChecklistItem {dci_id}: {e}")
                 raise SalesforceAPIError(f"Failed to link summary {summary_id} to DCI {dci_id}: {e}")
+
+    def touch_verification_summary(self, summary_id: str) -> None:
+        """
+        Touch the AVS record to update its LastModifiedDate.
+
+        This is called AFTER link_summary_to_related_items to ensure the AVS LastModifiedDate
+        is more recent than the linked record's LastModifiedDate. This is critical for the
+        skip logic in should_skip_processing() - if AVS.LastModifiedDate < Record.LastModifiedDate,
+        the skip logic incorrectly thinks the record was modified and needs reprocessing.
+
+        By touching AVS after linking, we ensure AVS.LastModifiedDate > Record.LastModifiedDate,
+        so subsequent runs will correctly skip already-processed records.
+        """
+        if not summary_id:
+            return
+        self._ensure_connected()
+        try:
+            summary_obj_name = APPLICATION_VERIFICATION_SUMMARY_OBJECT_API_NAME
+            handler = getattr(self.sf, summary_obj_name)
+            # Update with empty payload just to refresh LastModifiedDate
+            # Salesforce will update LastModifiedDate even if no fields changed
+            self._call_sf_api_with_retry(lambda: handler.update(summary_id, {}))
+            logger.debug(f"Touched AVS {summary_id} to update LastModifiedDate")
+        except Exception as e:
+            # Non-critical - log warning but don't fail the operation
+            logger.warning(f"Failed to touch AVS {summary_id}: {e}")
 
     def get_existing_avs_metadata(
         self,
@@ -430,6 +486,17 @@ class SalesforceService:
         if not dci_id:
             raise SalesforceAPIError("DCI ID is required to fetch document data.")
         self._ensure_connected()
+
+        # Query DCI record for LastModifiedDate
+        dci_last_modified = None
+        try:
+            soql_dci = f"SELECT Id, LastModifiedDate FROM DocumentChecklistItem WHERE Id = '{dci_id}' LIMIT 1"
+            dci_result = self._call_sf_api_with_retry(lambda: self.sf.query(soql_dci))
+            if dci_result.get('totalSize', 0) > 0:
+                dci_last_modified = dci_result['records'][0].get('LastModifiedDate')
+        except Exception as e:
+            logger.warning(f"Could not fetch DCI LastModifiedDate for {dci_id}: {e}")
+
         content_version_id = None
         max_retries = 4
         retry_delay_seconds = 3
@@ -440,37 +507,41 @@ class SalesforceService:
                 if result_link.get('totalSize', 0) > 0:
                     content_version_id = result_link['records'][0]['ContentDocument']['LatestPublishedVersionId']
                     logger.info(f"Found ContentVersion ID '{content_version_id}' for DCI {dci_id} on attempt {attempt + 1}.")
-                    break 
+                    break
                 logger.warning(f"Attempt {attempt + 1}/{max_retries}: ContentDocumentLink not found for DCI {dci_id}. Retrying...")
                 time.sleep(retry_delay_seconds)
             except Exception as e:
                 logger.error(f"Exception during SOQL query for DCI {dci_id} on attempt {attempt+1}: {e}", exc_info=True)
                 time.sleep(retry_delay_seconds)
-        
+
         if not content_version_id:
             raise SalesforceAPIError(f"FINAL FAILURE: Could not find any ContentDocumentLink for DCI {dci_id} after {max_retries} attempts.")
-        
+
         try:
             handler = getattr(self.sf, 'ContentVersion')
             version_record = self._call_sf_api_with_retry(lambda: handler.get(content_version_id))
             version_data_url = version_record.get('VersionData')
             if not version_data_url:
                 raise SalesforceAPIError(f"Found ContentVersion {content_version_id}, but it has no 'VersionData' URL.")
-            
+
             full_download_url = f"https://{self.sf.sf_instance}{version_data_url}"
             def do_download():
                 response = self.sf.session.get(full_download_url, headers=self.sf.headers, timeout=60)
                 response.raise_for_status()
                 return response.content
-            
+
             file_bytes = self._call_sf_api_with_retry(do_download)
             logger.info(f"Successfully downloaded {len(file_bytes)} bytes for ContentVersion {content_version_id}.")
             base64_data = base64.b64encode(file_bytes).decode('utf-8')
-            return {"documentPayload": {
-                "fileName": version_record.get('Title'),
-                "fileExtension": version_record.get('FileExtension'),
-                "base64Data": base64_data
-            }}
+            return {
+                "LastModifiedDate": dci_last_modified,  # DCI record date for skip logic
+                "documentPayload": {
+                    "fileName": version_record.get('Title'),
+                    "fileExtension": version_record.get('FileExtension'),
+                    "base64Data": base64_data,
+                    "LastModifiedDate": version_record.get('LastModifiedDate')  # ContentVersion date
+                }
+            }
         except Exception as e:
             logger.error(f"An unexpected error occurred during file download for CV ID {content_version_id}: {e}", exc_info=True)
             raise SalesforceAPIError(f"File download failed for ContentVersion {content_version_id}: {e}")
