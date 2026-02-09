@@ -159,7 +159,15 @@ async def process_single_test_score_detail(
         # Reset usage before doc extraction
         reset_global_usage()
 
-        document_text_string = await extract_text_from_file(base64_data, file_extension, record_id=test_score_id, extractor=extractor_instance)
+        # Smart extraction: pass record type and data for context-aware extraction
+        document_text_string = await extract_text_from_file(
+            base64_data,
+            file_extension,
+            record_id=test_score_id,
+            extractor=extractor_instance,
+            record_type="test_score",
+            record_data=record_data
+        )
 
         # Capture doc extraction usage
         doc_usage = _capture_usage()

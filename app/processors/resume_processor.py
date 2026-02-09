@@ -94,7 +94,16 @@ async def process_single_resume_detail(
         # Reset usage before doc extraction
         reset_global_usage()
 
-        document_text_string = await extract_text_from_file(base64_data, file_extension, record_id=resume_dci_id, extractor=extractor_instance)
+        # Smart extraction: pass record type for context-aware extraction
+        # Resume extraction focuses on detecting PII rather than field matching
+        document_text_string = await extract_text_from_file(
+            base64_data,
+            file_extension,
+            record_id=resume_dci_id,
+            extractor=extractor_instance,
+            record_type="resume",
+            record_data={}  # Resume doesn't have field data to match
+        )
 
         # Capture doc extraction usage
         doc_usage = _capture_usage()

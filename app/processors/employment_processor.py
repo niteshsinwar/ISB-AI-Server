@@ -132,7 +132,15 @@ async def process_single_employment_detail(
         # Reset usage before doc extraction
         reset_global_usage()
 
-        document_text_string = await extract_text_from_file(base64_data, file_extension, record_id=employment_log_id, extractor=extractor_instance)
+        # Smart extraction: pass record type and data for context-aware extraction
+        document_text_string = await extract_text_from_file(
+            base64_data,
+            file_extension,
+            record_id=employment_log_id,
+            extractor=extractor_instance,
+            record_type="employment",
+            record_data=record_data
+        )
 
         # Capture doc extraction usage
         doc_usage = _capture_usage()

@@ -19,7 +19,10 @@ from app.langgraph.graph_prompts import (
     FINAL_REPORT_GENERATION_EXPECTED_OUTPUT
 )
 from app.langgraph.state import VerificationState
-from app.langgraph.graph_utils import get_llm, parse_json_from_response
+from app.langgraph.graph_utils import (
+    get_llm, parse_json_from_response,
+    format_record_for_llm, format_fields_for_llm, format_comparison_for_reporter
+)
 from app.langgraph.schemas import ValidatedCrewReport
 
 logger = logging.getLogger(__name__)
@@ -41,23 +44,28 @@ class TestScoreGraphNodes:
         """
         Comparison Step: Compares Record Data vs Document Text for Test Scores.
         Implements three-way validation (API vs Applicant vs Document).
+        Uses LLM-friendly plain text formatting for efficient token usage.
         """
         logger.info("Executing Test Score Comparator Node")
 
+        # Format data as LLM-friendly plain text (not JSON)
+        formatted_fields = format_fields_for_llm(state['verifiable_fields'])
+        formatted_record = format_record_for_llm(state['record_data'], state['verifiable_fields'])
+
         prompt = f"""
-        {TEST_SCORE_DATA_COMPARATOR_AGENT_GOAL}
-        {TEST_SCORE_DATA_COMPARATOR_AGENT_BACKSTORY}
+{TEST_SCORE_DATA_COMPARATOR_AGENT_GOAL}
+{TEST_SCORE_DATA_COMPARATOR_AGENT_BACKSTORY}
 
-        TASK:
-        {TEST_SCORE_DATA_COMPARISON_TASK_DESCRIPTION.format(
-            verifiable_fields=state['verifiable_fields'],
-            record_data=state['record_data'],
-            document_text=state['document_text']
-        )}
+TASK:
+{TEST_SCORE_DATA_COMPARISON_TASK_DESCRIPTION.format(
+    verifiable_fields=formatted_fields,
+    record_data=formatted_record,
+    document_text=state['document_text']
+)}
 
-        EXPECTED OUTPUT:
-        {TEST_SCORE_DATA_COMPARISON_EXPECTED_OUTPUT}
-        """
+EXPECTED OUTPUT:
+{TEST_SCORE_DATA_COMPARISON_EXPECTED_OUTPUT}
+"""
 
         response = self.llm_comparator.invoke(prompt)
         return {"comparison_task_output": response.content}
@@ -68,18 +76,21 @@ class TestScoreGraphNodes:
         """
         logger.info("Executing Test Score Reporter Node")
 
+        # Format comparison output for reporter
+        formatted_context = format_comparison_for_reporter(state['comparison_task_output'])
+
         prompt = f"""
-        {FINAL_REPORT_GENERATOR_AGENT_GOAL}
-        {FINAL_REPORT_GENERATOR_AGENT_BACKSTORY}
+{FINAL_REPORT_GENERATOR_AGENT_GOAL}
+{FINAL_REPORT_GENERATOR_AGENT_BACKSTORY}
 
-        TASK:
-        {FINAL_REPORT_GENERATION_TASK_DESCRIPTION.format(
-            context=state['comparison_task_output']
-        )}
+TASK:
+{FINAL_REPORT_GENERATION_TASK_DESCRIPTION.format(
+    context=formatted_context
+)}
 
-        EXPECTED OUTPUT:
-        {FINAL_REPORT_GENERATION_EXPECTED_OUTPUT}
-        """
+EXPECTED OUTPUT:
+{FINAL_REPORT_GENERATION_EXPECTED_OUTPUT}
+"""
 
         response = self.llm_reporter.invoke(prompt)
 
