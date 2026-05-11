@@ -22,8 +22,8 @@ RUN mkdir -p /app/certs
 
 # Copy the certificate files from your local 'apps/certs' directory
 # to '/app/certs/' inside the Docker image.
-COPY certs/cert.key /app/certs/salesforcechain.key
-COPY certs/cert.crt /app/certs/salesforcechain.crt
+COPY certs/isbcert.key /app/certs/isbcert.key
+COPY certs/isbcert.crt /app/certs/isbcert.crt
 
 COPY ./app ./app
 
