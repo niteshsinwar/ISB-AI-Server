@@ -29,8 +29,8 @@ if __name__ == "__main__":
         uvicorn_log_level = "info"
 
     # --- SSL Configuration for Uvicorn ---
-    ssl_keyfile_path = "/app/certs/salesforcechain.key"    # Path inside the container
-    ssl_certfile_path = "/app/certs/salesforcechain.crt" # Path inside the container
+    ssl_keyfile_path = "/app/certs/isbcert.key"
+    ssl_certfile_path = "/app/certs/isbcert.crt"
 
     ssl_params = {} # Changed variable name to avoid conflict if 'ssl_config' is used elsewhere
     if os.path.exists(ssl_keyfile_path) and os.path.exists(ssl_certfile_path):

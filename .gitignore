@@ -135,3 +135,7 @@ terraform.tfstate.backup
 *.tmp
 *.bak
 *.temp
+
+# Local tool configs
+.claude/
+.sfdx/

@@ -1,3 +1,10 @@
+# SSL Certificates (server-specific, never overwrite via deploy)
+certs/
+
+# Local tool configs (not needed on server)
+.claude/
+.sfdx/
+
 # Python specific
 __pycache__/
 *.pyc
