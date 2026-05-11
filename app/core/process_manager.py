@@ -55,7 +55,8 @@ class ProcessManager:
         sf_config: Dict[str, str],
         prefetched_data: Dict[str, Any],
         timeout_seconds: Optional[int] = None,
-        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        opportunity_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute a job in an isolated worker process.
@@ -88,6 +89,7 @@ class ProcessManager:
         job_data = {
             'job_id': job_id,
             'application_id': application_id,
+            'opportunity_id': opportunity_id,
             'sf_config': sf_config,
             'prefetched_data': prefetched_data
         }

@@ -18,6 +18,7 @@ class Job(BaseModel):
     job_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     salesforce_job_record_id: Optional[str] = None
     application_id: str
+    opportunity_id: Optional[str] = None  # Set for EEDL jobs; triggers EEDL SF methods
     org_alias: Optional[str] = None
     status: str = "queued"
     message: Optional[str] = "Waiting for available slot."
@@ -33,7 +34,7 @@ class JobManager:
         self._active_jobs: Dict[str, Job] = {}
         self._lock = asyncio.Lock()
 
-    async def create_job(self, application_id: str, client_fingerprint: str, sf_service: SalesforceService) -> Job:
+    async def create_job(self, application_id: str, client_fingerprint: str, sf_service: SalesforceService, opportunity_id: Optional[str] = None) -> Job:
         """
         Create a new job for an application.
 
@@ -46,9 +47,13 @@ class JobManager:
         stale_job_id: Optional[str] = None
 
         org_alias = getattr(sf_service, "org_alias", None)
+        is_eedl = opportunity_id is not None
 
         # Fetch existing logs to preserve them during the initial "queued" status upsert
-        existing_job_data = await sf_service.get_latest_ai_server_job(application_id)
+        if is_eedl:
+            existing_job_data = await sf_service.get_latest_eedl_ai_server_job(opportunity_id)
+        else:
+            existing_job_data = await sf_service.get_latest_ai_server_job(application_id)
         existing_logs = existing_job_data.get("logs") if existing_job_data else None
 
         async with self._lock:
@@ -59,19 +64,29 @@ class JobManager:
 
             new_job = Job(
                 application_id=application_id,
+                opportunity_id=opportunity_id,
                 client_fingerprint=client_fingerprint,
                 org_alias=org_alias,
-                logs=existing_logs  # Store for reference (not passed to worker)
+                logs=existing_logs
             )
 
-            # Initial upsert preserves existing logs by explicitly including them
-            sf_job_id = await sf_service.upsert_ai_server_job(
-                job_id=new_job.job_id,
-                application_id=new_job.application_id,
-                status=new_job.status,
-                client_fingerprint=new_job.client_fingerprint,
-                logs=existing_logs  # Preserve existing logs during initial record update
-            )
+            # Initial upsert — route to EEDL or admission SF method
+            if is_eedl:
+                sf_job_id = await sf_service.upsert_eedl_ai_server_job(
+                    job_id=new_job.job_id,
+                    opportunity_id=opportunity_id,
+                    status=new_job.status,
+                    client_fingerprint=new_job.client_fingerprint,
+                    logs=existing_logs,
+                )
+            else:
+                sf_job_id = await sf_service.upsert_ai_server_job(
+                    job_id=new_job.job_id,
+                    application_id=new_job.application_id,
+                    status=new_job.status,
+                    client_fingerprint=new_job.client_fingerprint,
+                    logs=existing_logs,
+                )
             if not sf_job_id:
                 raise RuntimeError("Failed to create initial job record in Salesforce.")
             
@@ -120,27 +135,47 @@ class JobManager:
             if progress:
                 job.progress = progress
 
-        await sf_service.upsert_ai_server_job(
-            job_id=job.job_id,
-            application_id=job.application_id,
-            status=job.status,
-            message=job.message,
-            progress_details=json.dumps(job.progress) if job.progress else None,
-            logs=logs
-        )
+        if job.opportunity_id:
+            await sf_service.upsert_eedl_ai_server_job(
+                job_id=job.job_id,
+                opportunity_id=job.opportunity_id,
+                status=job.status,
+                message=job.message,
+                progress_details=json.dumps(job.progress) if job.progress else None,
+                logs=logs,
+            )
+        else:
+            await sf_service.upsert_ai_server_job(
+                job_id=job.job_id,
+                application_id=job.application_id,
+                status=job.status,
+                message=job.message,
+                progress_details=json.dumps(job.progress) if job.progress else None,
+                logs=logs,
+            )
 
     async def get_job_status(self, application_id: str, sf_service: SalesforceService) -> Optional[Dict[str, Any]]:
         async with self._lock:
             active_job = self._active_jobs.get(application_id)
 
         if active_job:
-            sf_status = await sf_service.get_latest_ai_server_job(application_id)
+            if active_job.opportunity_id:
+                sf_status = await sf_service.get_latest_eedl_ai_server_job(active_job.opportunity_id)
+            else:
+                sf_status = await sf_service.get_latest_ai_server_job(application_id)
             if sf_status:
                 return sf_status
             return active_job.model_dump()
-        
-        logger.info(f"No active job for App {application_id} in memory. Querying Salesforce org {sf_service.instance_url}.")
-        return await sf_service.get_latest_ai_server_job(application_id)
+
+        logger.info(f"No active job for {application_id} in memory. Querying Salesforce org {sf_service.instance_url}.")
+        # Without an active job we don't know the type — try admission first, then EEDL
+        try:
+            result = await sf_service.get_latest_ai_server_job(application_id)
+            if result:
+                return result
+        except Exception:
+            pass
+        return await sf_service.get_latest_eedl_ai_server_job(application_id)
 
     async def get_queue_overview(self, org_alias: Optional[str] = None) -> Dict[str, Any]:
         async with self._lock:
@@ -180,12 +215,20 @@ class JobManager:
             original_status = job.model_dump()
 
         logger.warning(f"Admin clearing job {job.job_id} for App {application_id} in org {sf_service.instance_url}")
-        await sf_service.upsert_ai_server_job(
-            job_id=job.job_id,
-            application_id=job.application_id,
-            status="failed",
-            message="Manually cleared by admin."
-        )
+        if job.opportunity_id:
+            await sf_service.upsert_eedl_ai_server_job(
+                job_id=job.job_id,
+                opportunity_id=job.opportunity_id,
+                status="failed",
+                message="Manually cleared by admin.",
+            )
+        else:
+            await sf_service.upsert_ai_server_job(
+                job_id=job.job_id,
+                application_id=job.application_id,
+                status="failed",
+                message="Manually cleared by admin.",
+            )
 
         process_manager = await get_process_manager()
         await process_manager.kill_job_worker(job.job_id)

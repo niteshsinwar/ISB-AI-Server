@@ -25,12 +25,16 @@ SALESFORCE_ORGS: Dict[str, Dict[str, Any]] = {
         "client_secret": os.getenv("UAT_SALESFORCE_CLIENT_SECRET"),
         "token_url": os.getenv("UAT_SALESFORCE_TOKEN_URL"),
     },
-     "prod": {
+    "prod": {
         "client_id": os.getenv("PROD_SALESFORCE_CLIENT_ID"),
         "client_secret": os.getenv("PROD_SALESFORCE_CLIENT_SECRET"),
         "token_url": os.getenv("PROD_SALESFORCE_TOKEN_URL"),
-    }
-
+    },
+    "cee_dev": {
+        "client_id": os.getenv("CEE_DEV_SALESFORCE_CLIENT_ID"),
+        "client_secret": os.getenv("CEE_DEV_SALESFORCE_CLIENT_SECRET"),
+        "token_url": os.getenv("CEE_DEV_SALESFORCE_TOKEN_URL"),
+    },
 }
 
 # --- Salesforce Object and Field API Names ---
@@ -77,6 +81,103 @@ READABLE_OBJECT_NAMES: Dict[str, str] = {
     TEST_SCORE_OBJECT_API_NAME: "Test Score Records",
     DCI_OBJECT_API_NAME: "Resume Detail"
 }
+
+# -----------------------------------------------------------------------
+# --- EEDL Module Configuration (Executive Education & Digital Learning) --
+# -----------------------------------------------------------------------
+
+# --- EEDL: Salesforce Object API Names ---
+EEDL_OPPORTUNITY_OBJECT_API_NAME: str = os.getenv("EEDL_OPPORTUNITY_OBJECT_API_NAME", "Opportunity")
+EEDL_EDUCATION_OBJECT_API_NAME: str = os.getenv("EEDL_EDUCATION_OBJECT_API_NAME", "Education__c")
+
+# --- EEDL: Opportunity Field API Names ---
+EEDL_OPP_CONTACT_LOOKUP_FIELD: str = os.getenv("EEDL_OPP_CONTACT_LOOKUP_FIELD", "ContactId")
+EEDL_OPP_CITIZENSHIP_FIELD: str = os.getenv("EEDL_OPP_CITIZENSHIP_FIELD", "APP_Citizeship__c")
+
+# --- EEDL: Education__c Field API Names ---
+EEDL_EDU_CONTACT_LOOKUP_FIELD: str = os.getenv("EEDL_EDU_CONTACT_LOOKUP_FIELD", "Contact__c")
+EEDL_EDU_DEGREE_FIELD: str = os.getenv("EEDL_EDU_DEGREE_FIELD", "Degree_Name__c")
+EEDL_EDU_UNIVERSITY_FIELD: str = os.getenv("EEDL_EDU_UNIVERSITY_FIELD", "University_Name__c")
+EEDL_EDU_GPA_FIELD: str = os.getenv("EEDL_EDU_GPA_FIELD", "GPA__c")
+EEDL_EDU_START_DATE_FIELD: str = os.getenv("EEDL_EDU_START_DATE_FIELD", "From__c")
+EEDL_EDU_END_DATE_FIELD: str = os.getenv("EEDL_EDU_END_DATE_FIELD", "To__c")
+
+# --- EEDL: AI_Server_Job__c — new Opportunity lookup field (to be created in SF) ---
+AIJ_OPPORTUNITY_LOOKUP_FIELD: str = os.getenv("AIJ_OPPORTUNITY_LOOKUP_FIELD", "Opportunity__c")
+
+# --- EEDL: EEDL_Verification_Summary__c Object and Field API Names (to be created in SF) ---
+EEDL_VS_OBJECT_API_NAME: str = os.getenv("EEDL_VS_OBJECT_API_NAME", "EEDL_Verification_Summary__c")
+EEDL_VS_OPPORTUNITY_LOOKUP_FIELD: str = "Opportunity__c"
+EEDL_VS_EDUCATION_LOOKUP_FIELD: str = "Education__c"
+EEDL_VS_RECORD_TYPE_FIELD: str = "Record_Type__c"
+EEDL_VS_VERIFICATION_STATUS_FIELD: str = "Overall_Status__c"
+EEDL_VS_CONFIDENCE_FIELD: str = "Confidence_Score__c"
+EEDL_VS_REPORT_FIELD: str = "Summary_HTML__c"
+EEDL_VS_OVERALL_FEEDBACK_FIELD: str = "Overall_Feedback__c"
+EEDL_VS_MISMATCHED_FIELDS_FIELD: str = "Mismatched_Field_List__c"
+EEDL_VS_NAME_FIELD: str = "Name"
+
+# --- EEDL: Record Type picklist values for EEDL_Verification_Summary__c ---
+EEDL_VS_RECORD_TYPE_ID_DOCUMENT: str = "ID_Document"
+EEDL_VS_RECORD_TYPE_EDUCATION: str = "Education"
+
+# --- EEDL: File Name Matching Configuration ---
+# All keyword matching is case-insensitive on the ContentVersion Title/FileName.
+# Update keyword lists with actual file naming conventions used by the client.
+EEDL_FILE_MATCHING_CONFIG: Dict[str, Any] = {
+    # If ANY of these keywords appear in the filename → treat as Aadhaar / Passport ID document
+    "id_document_keywords": [
+        "aadhaar", "aadhar", "adhar", "adhaar",
+        "passport"
+    ],
+    # Each entry maps filename keywords → Education__c Degree__c values to match against.
+    # Matching: if filename contains a file_keyword AND an Education__c record's
+    # Degree__c value is in degree_values → that record gets this file.
+    "education_keyword_map": [
+        {
+            "file_keywords": ["ug", "undergraduate", "bachelor", "btech", "be", "bsc", "ba"],
+            "degree_values": ["Bachelors", "Bachelor", "B.Tech", "BE", "BSc", "BA"]
+        },
+        {
+            "file_keywords": ["pg", "postgraduate", "master", "mtech", "mba", "msc", "ma"],
+            "degree_values": ["Masters", "Master", "MBA", "M.Tech", "MSc", "MA"]
+        },
+        {
+            "file_keywords": ["phd", "doctorate", "doctoral"],
+            "degree_values": ["Doctorate", "PhD", "Ph.D"]
+        },
+        {
+            "file_keywords": ["xii", "12th", "hsc", "senior secondary", "plus2", "class12"],
+            "degree_values": ["XII", "12th", "HSC", "Senior Secondary"]
+        },
+        {
+            "file_keywords": ["x", "10th", "ssc", "matriculation", "class10"],
+            "degree_values": ["X", "10th", "SSC", "Matriculation"]
+        }
+    ]
+}
+
+EEDL_READABLE_OBJECT_NAMES: Dict[str, str] = {
+    "ID_Document": "ID Document Verification",
+    EEDL_EDUCATION_OBJECT_API_NAME: "Education Verification",
+}
+
+# EEDL processing config — mirrors RELATED_RECORD_PROCESSING_CONFIG structure
+# Used by job_worker for priority sorting and readable name lookup
+EEDL_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
+    {
+        "target_record_type": "ID_Document",
+        "processor_module": "app.processors.eedl_id_processor",
+        "processor_function_name": "process_eedl_id_document",
+        "priority": 1,
+    },
+    {
+        "target_record_type": EEDL_EDUCATION_OBJECT_API_NAME,
+        "processor_module": "app.processors.eedl_education_processor",
+        "processor_function_name": "process_eedl_education_record",
+        "priority": 2,
+    },
+]
 
 # Apex REST Endpoint paths
 APEX_ENDPOINT_PATHS: Dict[str, str] = {

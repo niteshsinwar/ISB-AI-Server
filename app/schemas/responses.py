@@ -75,5 +75,20 @@ class ClearStatusResponse(BaseModel):
     cleared: bool = True
     previous_status_info: JobStatusResponse
 
+# --- EEDL Module Schemas ---
+
+class AnalyzeEEDLBodyRequest(BaseModel):
+    record_id: str = Field(..., description="The 15 or 18 character Salesforce Opportunity record ID.")
+
+class AnalyzeEEDLResponse(BaseModel):
+    request_id: str = Field(..., description="The unique job ID for this analysis request.")
+    opportunity_record_id: str = Field(..., description="The Salesforce Opportunity ID being processed.")
+    status: str = Field(..., description="Confirms the request was accepted, e.g., 'processing_queued'.")
+    message: str = Field(..., description="A human-readable message about the request status.")
+    status_url: str = Field(..., description="URL to poll for detailed status updates on this job.")
+    created_at: datetime = Field(..., description="UTC timestamp when the request was accepted.")
+    related_records_metadata: List[RelatedRecordMetadata] = Field(..., description="Metadata about related records found.")
+    estimated_completion: EstimatedCompletion = Field(..., description="Processing time estimate.")
+
 # REMOVED: BlockedClientInfo, SuspiciousClientsResponse, and UnblockClientResponse are
 # no longer needed as client blocking is automated and not manually managed via the API.

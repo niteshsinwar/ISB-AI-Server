@@ -75,19 +75,30 @@ def _emit_progress_update(progress: Optional[Dict[str, Any]]):
     _emit_json({"type": "progress", "progress": snapshot})
 
 
-async def _fetch_existing_logs(sf_service, application_id: str) -> Optional[str]:
+async def _fetch_existing_logs(sf_service, application_id: str, opportunity_id: Optional[str] = None) -> Optional[str]:
     """
     Fetch existing logs from Salesforce at job completion time.
-    This ensures we always get the freshest data before appending.
+    Routes to EEDL SF method when opportunity_id is provided.
     """
     try:
-        job_data = await sf_service.get_latest_ai_server_job(application_id)
+        if opportunity_id:
+            job_data = await sf_service.get_latest_eedl_ai_server_job(opportunity_id)
+        else:
+            job_data = await sf_service.get_latest_ai_server_job(application_id)
         if job_data:
             return job_data.get("logs")
         return None
     except Exception as e:
-        logger.warning(f"Could not fetch existing logs for {application_id}: {e}")
+        logger.warning(f"Could not fetch existing logs for {opportunity_id or application_id}: {e}")
         return None
+
+
+async def _sf_upsert_job(sf_service, job_id: str, application_id: str, opportunity_id: Optional[str], status: str, **kwargs):
+    """Route SF job upsert to EEDL or admission method based on job type."""
+    if opportunity_id:
+        await sf_service.upsert_eedl_ai_server_job(job_id=job_id, opportunity_id=opportunity_id, status=status, **kwargs)
+    else:
+        await sf_service.upsert_ai_server_job(job_id=job_id, application_id=application_id, status=status, **kwargs)
 
 
 async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -107,6 +118,7 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     job_id = job_data.get('job_id', 'unknown')
     application_id = job_data.get('application_id', 'unknown')
+    opportunity_id = job_data.get('opportunity_id')  # None for admission jobs, set for EEDL jobs
 
     logger.info(f"Worker process {os.getpid()} starting job {job_id} for application {application_id}")
 
@@ -120,10 +132,12 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
         from app.services.salesforce_service import SalesforceService
         from app.services.document_extraction_service import create_text_extractor
         from app.config import (
-            RELATED_RECORD_PROCESSING_CONFIG,
+            RELATED_RECORD_PROCESSING_CONFIG, EEDL_RECORD_PROCESSING_CONFIG,
             APPLICATION_OBJECT_API_NAME,
-            READABLE_OBJECT_NAMES
+            READABLE_OBJECT_NAMES, EEDL_READABLE_OBJECT_NAMES,
         )
+        all_priority_config = RELATED_RECORD_PROCESSING_CONFIG + EEDL_RECORD_PROCESSING_CONFIG
+        all_readable_names = {**READABLE_OBJECT_NAMES, **EEDL_READABLE_OBJECT_NAMES}
 
         # Extract parameters
         sf_config = job_data['sf_config']
@@ -144,7 +158,7 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
         # Initialize progress tracking
         progress = {}
         for record_type, data in prefetched_data.items():
-            readable_name = READABLE_OBJECT_NAMES.get(record_type, record_type)
+            readable_name = all_readable_names.get(record_type, record_type)
             progress[readable_name] = {
                 "status": "pending",
                 "total": len(data.get("ids", [])),
@@ -152,45 +166,40 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
             }
 
         # Update Salesforce: processing started
-        await sf_service.upsert_ai_server_job(
-            job_id=job_id,
-            application_id=application_id,
+        await _sf_upsert_job(
+            sf_service, job_id, application_id, opportunity_id,
             status="processing",
             message="Worker process started. Initializing analysis...",
-            progress_details=json.dumps(progress)
+            progress_details=json.dumps(progress),
         )
         _emit_progress_update(progress)
 
-        # Sort records by priority
+        # Sort records by priority (covers both admission and EEDL config)
         sorted_records = sorted(
             prefetched_data.items(),
             key=lambda x: next(
-                (cfg["priority"] for cfg in RELATED_RECORD_PROCESSING_CONFIG
+                (cfg["priority"] for cfg in all_priority_config
                  if cfg["target_record_type"] == x[0]), 999
             )
         )
 
         # Process all records sequentially by priority
         for record_type, data in sorted_records:
-            readable_name = READABLE_OBJECT_NAMES.get(record_type, record_type)
+            readable_name = all_readable_names.get(record_type, record_type)
 
             if not data.get("ids"):
                 progress[readable_name]["status"] = "skipped"
-                await sf_service.upsert_ai_server_job(
-                    job_id=job_id,
-                    application_id=application_id,
-                    status="processing",
-                    progress_details=json.dumps(progress)
+                await _sf_upsert_job(
+                    sf_service, job_id, application_id, opportunity_id,
+                    status="processing", progress_details=json.dumps(progress),
                 )
                 _emit_progress_update(progress)
                 continue
 
             progress[readable_name]["status"] = "processing"
-            await sf_service.upsert_ai_server_job(
-                job_id=job_id,
-                application_id=application_id,
-                status="processing",
-                progress_details=json.dumps(progress)
+            await _sf_upsert_job(
+                sf_service, job_id, application_id, opportunity_id,
+                status="processing", progress_details=json.dumps(progress),
             )
             _emit_progress_update(progress)
 
@@ -205,41 +214,29 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
                     f"record {i+1}/{len(data['ids'])} (ID: {r_id})"
                 )
 
-                # Call processor - processors now handle detailed token logging internally
-                # (doc extraction and crew processing are tracked separately)
                 if record_type == APPLICATION_OBJECT_API_NAME:
+                    # Admission application processor has extra record_type positional arg
                     await func(
-                        sf_service,
-                        r_id,
-                        application_id,
-                        record_type,
-                        item_index=(i + 1),
-                        extractor_instance=job_extractor,
+                        sf_service, r_id, application_id, record_type,
+                        item_index=(i + 1), extractor_instance=job_extractor,
                     )
                 else:
                     await func(
-                        sf_service,
-                        r_id,
-                        application_id,
-                        extractor_instance=job_extractor,
-                        item_index=(i + 1),
+                        sf_service, r_id, application_id,
+                        item_index=(i + 1), extractor_instance=job_extractor,
                     )
 
                 progress[readable_name]["processed"] += 1
-                await sf_service.upsert_ai_server_job(
-                    job_id=job_id,
-                    application_id=application_id,
-                    status="processing",
-                    progress_details=json.dumps(progress)
+                await _sf_upsert_job(
+                    sf_service, job_id, application_id, opportunity_id,
+                    status="processing", progress_details=json.dumps(progress),
                 )
                 _emit_progress_update(progress)
 
             progress[readable_name]["status"] = "completed"
-            await sf_service.upsert_ai_server_job(
-                job_id=job_id,
-                application_id=application_id,
-                status="processing",
-                progress_details=json.dumps(progress)
+            await _sf_upsert_job(
+                sf_service, job_id, application_id, opportunity_id,
+                status="processing", progress_details=json.dumps(progress),
             )
             _emit_progress_update(progress)
 
@@ -248,7 +245,7 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"Worker {os.getpid()}: Job {job_id} processing complete. Fetching existing logs for merge...")
 
         # Fetch existing logs from Salesforce (fresh query at completion time)
-        existing_logs_json = await _fetch_existing_logs(sf_service, application_id)
+        existing_logs_json = await _fetch_existing_logs(sf_service, application_id, opportunity_id)
         existing_count = 0
         if existing_logs_json:
             try:
@@ -278,13 +275,12 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"Worker {os.getpid()}: Merged logs - now {len(merged_logs)} total attempt(s)")
 
         # All processing complete - save merged logs to Salesforce
-        await sf_service.upsert_ai_server_job(
-            job_id=job_id,
-            application_id=application_id,
+        await _sf_upsert_job(
+            sf_service, job_id, application_id, opportunity_id,
             status="completed",
             message="All verification tasks completed successfully.",
             progress_details=json.dumps(progress),
-            logs=merged_logs_json
+            logs=merged_logs_json,
         )
         _emit_progress_update(progress)
 
@@ -308,7 +304,7 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
         try:
             if 'sf_service' in locals():
                 # Fetch existing logs from Salesforce
-                existing_logs_json = await _fetch_existing_logs(sf_service, application_id)
+                existing_logs_json = await _fetch_existing_logs(sf_service, application_id, opportunity_id)
                 existing_count = 0
                 if existing_logs_json:
                     try:
@@ -334,13 +330,12 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
                 logger.info(f"Worker {os.getpid()}: Merged logs on failure - now {len(merged_logs)} total attempt(s)")
 
                 # Update Salesforce with error and merged logs
-                await sf_service.upsert_ai_server_job(
-                    job_id=job_id,
-                    application_id=application_id,
+                await _sf_upsert_job(
+                    sf_service, job_id, application_id, opportunity_id,
                     status="failed",
                     message=error_msg[:131072],
                     progress_details=json.dumps(progress) if 'progress' in locals() else None,
-                    logs=merged_logs_json
+                    logs=merged_logs_json,
                 )
                 if 'progress' in locals():
                     _emit_progress_update(progress)
