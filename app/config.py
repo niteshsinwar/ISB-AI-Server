@@ -96,7 +96,7 @@ EEDL_OPP_CITIZENSHIP_FIELD: str = os.getenv("EEDL_OPP_CITIZENSHIP_FIELD", "APP_C
 
 # --- EEDL: Education__c Field API Names ---
 EEDL_EDU_CONTACT_LOOKUP_FIELD: str = os.getenv("EEDL_EDU_CONTACT_LOOKUP_FIELD", "Contact__c")
-EEDL_EDU_DEGREE_FIELD: str = os.getenv("EEDL_EDU_DEGREE_FIELD", "Degree_Name__c")
+EEDL_EDU_DEGREE_FIELD: str = os.getenv("EEDL_EDU_DEGREE_FIELD", "Degree_Type__c")
 EEDL_EDU_UNIVERSITY_FIELD: str = os.getenv("EEDL_EDU_UNIVERSITY_FIELD", "University_Name__c")
 EEDL_EDU_GPA_FIELD: str = os.getenv("EEDL_EDU_GPA_FIELD", "GPA__c")
 EEDL_EDU_START_DATE_FIELD: str = os.getenv("EEDL_EDU_START_DATE_FIELD", "From__c")

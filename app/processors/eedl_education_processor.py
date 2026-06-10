@@ -2,7 +2,11 @@ import logging
 import asyncio
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from app.config import EEDL_VS_RECORD_TYPE_EDUCATION, MAX_SALESFORCE_REPORT_LENGTH
+from app.config import (
+    EEDL_EDU_DEGREE_FIELD,
+    EEDL_VS_RECORD_TYPE_EDUCATION,
+    MAX_SALESFORCE_REPORT_LENGTH,
+)
 from app.core.processing_utils import should_skip_processing
 from app.core.job_run_logger import get_job_logger
 from app.langgraph.llm_utils import reset_global_usage, get_job_cost_summary
@@ -54,7 +58,7 @@ async def process_eedl_education_record(
         document_payload = details.get("documentPayload")
         salesforce_data_issue = details.get("Salesforce_data_issue_Summary")
 
-        degree_label = record_data.get("Degree_Name__c") or item_index or education_id
+        degree_label = record_data.get(EEDL_EDU_DEGREE_FIELD) or item_index or education_id
         record_type_label = f"Education_{degree_label}"
 
         # Skip check — query existing EEDL_Verification_Summary__c for this education record
@@ -119,6 +123,8 @@ async def process_eedl_education_record(
             record_type="education",
             record_data=record_data,
         )
+        if not document_text or not document_text.strip():
+            raise DocumentExtractionError("No text could be extracted from the education document.")
         doc_usage = _capture_usage()
         logger.info(f"Doc extraction usage for {education_id}: {doc_usage}")
 
