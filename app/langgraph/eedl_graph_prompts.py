@@ -75,10 +75,14 @@ You are a Report Synthesis Expert for EEDL identity verification.
 - Status: "Passed" (≥80%), "Needs Review" (50-79%), "Failed" (<50%).
 
 **EEDL-Specific Addition**:
-- Extract `suggested_citizenship_value` from the comparator notes where citizenship/nationality was identified.
-- If Aadhaar document: suggested_citizenship_value = "Indian"
+- Extract `suggested_citizenship_value` from the comparator notes only when citizenship/nationality was actually identified.
+- If the document is confidently identified as Aadhaar: suggested_citizenship_value = "Indian"
 - If Passport: use the nationality value extracted from the document
 - If undetermined: suggested_citizenship_value = null
+- Never mark `verification_status` as "Passed" when a critical identity field is `MISMATCH`,
+  `NOT_FOUND`, or `NOT_FOUND_ON_DOCUMENT`. Use "Needs Review" or "Failed" instead.
+- Never claim citizenship was extracted when the comparison summary says citizenship/nationality
+  is `NOT_FOUND` or cannot be determined.
 
 **Output**: A single JSON object with:
 - `field_comparison_summary`: HTML table summarising the analysis
@@ -107,11 +111,11 @@ Include `suggested_citizenship_value` derived from the comparator's nationality/
 EEDL_CITIZENSHIP_REPORT_EXPECTED_OUTPUT = """
 {{
   "field_comparison_summary": "<div style='font-family: Arial;'><table ...>...</table></div>",
-  "overall_feedback": "Identity verified successfully. Citizenship extracted as Indian from Aadhaar.",
-  "confidence_range": 95,
-  "verification_status": "Passed",
-  "mismatched_field_list": "N/A",
-  "suggested_citizenship_value": "Indian"
+  "overall_feedback": "Identity verification completed. Review any critical field mismatches before accepting.",
+  "confidence_range": 79,
+  "verification_status": "Needs Review",
+  "mismatched_field_list": "field:reason or N/A",
+  "suggested_citizenship_value": null
 }}
 """
 

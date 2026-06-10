@@ -1,8 +1,13 @@
 import logging
 import asyncio
+import re
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from app.config import EEDL_VS_RECORD_TYPE_ID_DOCUMENT, MAX_SALESFORCE_REPORT_LENGTH
+from app.config import (
+    EEDL_OPP_CITIZENSHIP_FIELD,
+    EEDL_VS_RECORD_TYPE_ID_DOCUMENT,
+    MAX_SALESFORCE_REPORT_LENGTH,
+)
 from app.core.processing_utils import should_skip_processing
 from app.core.job_run_logger import get_job_logger
 from app.langgraph.llm_utils import reset_global_usage, get_job_cost_summary
@@ -15,6 +20,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _READABLE = "ID Document Verification"
+_CRITICAL_ID_FIELDS = {"name", "app_citizeship__c", "citizenship", "nationality"}
+_CITIZENSHIP_FIELDS = {"app_citizeship__c", "citizenship", "nationality"}
+_BLOCKING_MISMATCH_REASONS = ("MISMATCH", "NOT_FOUND", "NOT_FOUND_ON_DOCUMENT", "INVALID")
+_NEEDS_REVIEW_CONFIDENCE_CAP = 79
+_CITIZENSHIP_WRITEBACK_PASS_STATUSES = {"passed", "verified"}
 
 
 def _capture_usage() -> Dict[str, Any]:
@@ -28,6 +38,126 @@ def _capture_usage() -> Dict[str, Any]:
         "cost": totals.get("total_cost_usd", 0.0),
         "model": model,
     }
+
+
+def _confidence_as_int(value: Any, default: int = _NEEDS_REVIEW_CONFIDENCE_CAP) -> int:
+    try:
+        return max(0, min(100, int(float(value))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_no_mismatch_value(value: Any) -> bool:
+    if value is None:
+        return True
+    normalized = str(value).strip().upper()
+    return normalized in {"", "N/A", "NA", "NONE", "NO MISMATCH", "NO MISMATCHES"}
+
+
+def _parse_mismatched_fields(value: Any) -> Dict[str, str]:
+    if _is_no_mismatch_value(value):
+        return {}
+    parsed: Dict[str, str] = {}
+    for entry in str(value).split(";"):
+        if ":" not in entry:
+            continue
+        field, reason = entry.split(":", 1)
+        field = field.strip().lower()
+        reason = reason.strip().upper()
+        if field and reason:
+            parsed[field] = reason
+    return parsed
+
+
+def _is_critical_id_field(field_name: str) -> bool:
+    normalized = field_name.strip().lower()
+    return (
+        normalized in _CRITICAL_ID_FIELDS
+        or "citizeship" in normalized
+        or "citizenship" in normalized
+        or "nationality" in normalized
+    )
+
+
+def _has_blocking_reason(reason: str) -> bool:
+    normalized = reason.upper()
+    return any(token in normalized for token in _BLOCKING_MISMATCH_REASONS)
+
+
+def _normalize_citizenship_for_crm(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+
+    normalized = str(value).strip().lower()
+    if normalized in {"", "n/a", "na", "none", "unknown", "not found", "undetermined"}:
+        return None
+
+    if normalized in {"india", "indian", "bharat"}:
+        return "India"
+
+    return "Outside India"
+
+
+def _should_writeback_citizenship(report: Dict[str, Any], crm_value: Optional[str]) -> bool:
+    status = str(report.get("verification_status") or "").strip().lower()
+    if status not in _CITIZENSHIP_WRITEBACK_PASS_STATUSES or crm_value is None:
+        return False
+
+    mismatches = _parse_mismatched_fields(report.get("mismatched_field_list"))
+    return not any(
+        _is_critical_id_field(field) and _has_blocking_reason(reason)
+        for field, reason in mismatches.items()
+    )
+
+
+def _normalize_eedl_id_report(report_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Guardrail for LLM synthesis drift.
+
+    The reporter can sometimes emit a "Passed" status while its own field table
+    says critical identity values were not found. Salesforce should receive the
+    deterministic business classification, not the contradictory LLM conclusion.
+    """
+    report = dict(report_dict)
+    mismatches = _parse_mismatched_fields(report.get("mismatched_field_list"))
+    html_summary = str(report.get("field_comparison_summary") or "").lower()
+
+    critical_failures = [
+        field for field, reason in mismatches.items()
+        if _is_critical_id_field(field) and _has_blocking_reason(reason)
+    ]
+
+    # If the LLM forgot to populate mismatched_field_list but the HTML table
+    # still contains a blocking status, treat the ID document as review-needed.
+    if not critical_failures and re.search(r"not_found_on_document|>mismatch<|>not_found<", html_summary):
+        critical_failures.append("field_comparison_summary")
+
+    if not critical_failures:
+        confidence = _confidence_as_int(report.get("confidence_range"), default=0)
+        if str(report.get("verification_status", "")).lower() == "passed" and confidence < 80:
+            report["verification_status"] = "Needs Review"
+        return report
+
+    report["verification_status"] = "Needs Review"
+    report["confidence_range"] = min(
+        _confidence_as_int(report.get("confidence_range")),
+        _NEEDS_REVIEW_CONFIDENCE_CAP,
+    )
+
+    if any(field in _CITIZENSHIP_FIELDS or "citizeship" in field or "citizenship" in field or "nationality" in field for field in critical_failures):
+        report["suggested_citizenship_value"] = None
+
+    failure_fields = ", ".join(sorted(set(critical_failures)))
+    guardrail_feedback = (
+        f"Needs review: critical ID document field(s) were not verified ({failure_fields})."
+    )
+    existing_feedback = str(report.get("overall_feedback") or "").strip()
+    if existing_feedback and guardrail_feedback.lower() not in existing_feedback.lower():
+        report["overall_feedback"] = f"{guardrail_feedback} {existing_feedback}"
+    else:
+        report["overall_feedback"] = guardrail_feedback
+
+    return report
 
 
 async def process_eedl_id_document(
@@ -110,6 +240,8 @@ async def process_eedl_id_document(
             record_type="application",
             record_data=record_data,
         )
+        if not document_text or not document_text.strip():
+            raise DocumentExtractionError("No text could be extracted from the ID document.")
         doc_usage = _capture_usage()
         logger.info(f"Doc extraction usage for {opportunity_id}: {doc_usage}")
 
@@ -117,6 +249,7 @@ async def process_eedl_id_document(
         from app.langgraph.eedl_citizenship_graph import CitizenshipGraphOrchestrator
         orchestrator = CitizenshipGraphOrchestrator(record_data, document_text)
         report_dict = await asyncio.to_thread(orchestrator.run)
+        report_dict = _normalize_eedl_id_report(report_dict)
 
         if not report_dict:
             raise ValueError("Citizenship graph did not return a valid report.")
@@ -132,15 +265,17 @@ async def process_eedl_id_document(
             status="completed",
         )
 
-        # Write citizenship value back to Opportunity if extracted
+        # Write citizenship value back only for clean passes, using CRM picklist values.
         suggested_citizenship = report_dict.get("suggested_citizenship_value")
-        if suggested_citizenship:
+        crm_citizenship = _normalize_citizenship_for_crm(suggested_citizenship)
+        existing_citizenship = record_data.get(EEDL_OPP_CITIZENSHIP_FIELD)
+        if _should_writeback_citizenship(report_dict, crm_citizenship) and existing_citizenship != crm_citizenship:
             await asyncio.to_thread(
                 sf_service.update_opportunity_citizenship,
                 opportunity_id,
-                suggested_citizenship,
+                crm_citizenship,
             )
-            logger.info(f"Updated Opportunity {opportunity_id} citizenship to '{suggested_citizenship}'")
+            logger.info(f"Updated Opportunity {opportunity_id} citizenship to '{crm_citizenship}'")
 
         # Persist verification result
         await asyncio.to_thread(
