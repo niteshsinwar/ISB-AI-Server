@@ -64,6 +64,9 @@ EDUCATION_LOG_FIELD_TO_PARENT_APP: str = "Application__c"
 EMPLOYMENT_LOG_OBJECT_API_NAME: str = "ISB_Employment_Log__c"
 EMPLOYMENT_LOG_FIELD_TO_PARENT_APP: str = "Application__c"
 
+RECOMMENDER_DETAIL_OBJECT_API_NAME: str = "ISB_Recommender_Details__c"
+RECOMMENDER_DETAIL_FIELD_TO_PARENT_APP: str = "Application__c"
+
 TEST_SCORE_OBJECT_API_NAME: str = "hed__Test__c"
 TEST_SCORE_LOOKUP_TO_PARENT_APP: str = "Application__c"
 # NEW: DocumentChecklistItem fields
@@ -75,6 +78,7 @@ READABLE_OBJECT_NAMES: Dict[str, str] = {
     APPLICATION_OBJECT_API_NAME: "Personal Detail",
     EDUCATION_LOG_OBJECT_API_NAME: "Education Records",
     EMPLOYMENT_LOG_OBJECT_API_NAME: "Employment Records",
+    RECOMMENDER_DETAIL_OBJECT_API_NAME: "Recommender Detail",
     TEST_SCORE_OBJECT_API_NAME: "Test Score Records",
     DCI_OBJECT_API_NAME: "Resume Detail"
 }
@@ -340,6 +344,15 @@ RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
         "value": "Accepted"
     }
 ]
+    },
+    {
+        "target_record_type": RECOMMENDER_DETAIL_OBJECT_API_NAME,
+        "retrieval_method": "direct",
+        "lookup_on_child_to_parent": RECOMMENDER_DETAIL_FIELD_TO_PARENT_APP,
+        "processor_module": "app.processors.recommender_processor",
+        "processor_function_name": "process_single_recommender_detail",
+        "priority": 6,
+        "filtering_criteria": None
     }
 ]
 
