@@ -1,4 +1,4 @@
-from typing import Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, constr
 
 class ValidatedCrewReport(BaseModel):
@@ -8,7 +8,9 @@ class ValidatedCrewReport(BaseModel):
     field_comparison_summary: constr(min_length=1)
     overall_feedback: constr(min_length=1)
     confidence_range: int = Field(..., ge=0, le=100)
+    overall_percentage_confidence: Optional[int] = Field(None, ge=0, le=100)
     mismatched_field_list: constr(min_length=1)
+    verification_analysis_report: Optional[List[Dict[str, Any]]] = None
     verification_status: Literal["Passed", "Failed", "Needs Review"] = "Needs Review"
 
 class ValidatedResumeReport(BaseModel):
@@ -26,6 +28,8 @@ class ValidatedCitizenshipReport(BaseModel):
     field_comparison_summary: constr(min_length=1)
     overall_feedback: constr(min_length=1)
     confidence_range: int = Field(..., ge=0, le=100)
+    overall_percentage_confidence: Optional[int] = Field(None, ge=0, le=100)
     mismatched_field_list: constr(min_length=1)
+    verification_analysis_report: Optional[List[Dict[str, Any]]] = None
     verification_status: Literal["Passed", "Failed", "Needs Review"] = "Needs Review"
     suggested_citizenship_value: Optional[str] = None

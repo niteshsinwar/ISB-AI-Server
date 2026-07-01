@@ -154,10 +154,6 @@ async def process_single_resume_detail(
             dci_id=resume_dci_id
         )
 
-        # Touch AVS to ensure its LastModifiedDate > DCI's LastModifiedDate
-        # This is critical for skip logic to work correctly on subsequent runs
-        await asyncio.to_thread(sf_service.touch_verification_summary, summary_record_id)
-
         logger.info(f"Successfully processed {readable_name} {resume_dci_id}. AVS ID: {summary_record_id}")
         return f"Successfully processed resume {resume_dci_id}."
 

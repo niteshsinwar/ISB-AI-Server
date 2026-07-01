@@ -18,7 +18,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 
 from app.config import (
-    DOC_GOOGLE_API_KEY, MODEL_TEXT_EXTRACTION, MODEL_DATA_ANALYSIS,
+    DOC_GOOGLE_API_KEY, MODEL_TEXT_EXTRACTION,
     RAW_OCR_PROMPT, DATA_STRUCTURING_PROMPT
 )
 
@@ -36,11 +36,16 @@ EXPECTED VALUES (use to locate correct record if multiple students/degrees exist
 {field_hints}
 
 EXTRACTION GUIDELINES:
+- Expected values are location hints only. Never copy them into the output, use them to fill missing data, or use them as a basis for inference.
 - STUDENT NAME: Extract full name as printed on document
 - INSTITUTION: Identify if it's a COLLEGE or UNIVERSITY (critical distinction). Note full institutional hierarchy.
-- DEGREE: Extract degree name and field of study
-- DATES: Start date, End date, Passing year with their labels
-- GPA/CGPA/PERCENTAGE: If final score printed, extract it. If only semester marks exist, calculate aggregate.
+- DEGREE: Extract the exact degree name and level.
+- FIELD OF STUDY: Extract the academic unit, faculty, broad discipline, or field exactly as printed. Do not copy the expected applicant value. Do not include text labeled branch, major, minor, discipline/specialization, or specialization in this field.
+- SPECIALIZATION: Separately extract the exact branch, major, discipline, or specialization printed on the document.
+- Keep Field of Study and Specialization separate. Do not infer or merge them during extraction; inference is performed by the comparison stage.
+- DATES: Extract only dates or partial dates explicitly printed with their labels. Do not infer missing dates or manufacture month/day values.
+- GPA/CGPA/PERCENTAGE: Extract an explicitly printed final/overall value only. Do not calculate an aggregate during extraction.
+- If no final/overall GPA or percentage is printed, return the requested score field as NOT_FOUND and add `ACADEMIC_SCORE_EVIDENCE` listing every printed semester/year total, maximum, GPA, CGPA, CPI, or percentage exactly as shown.
 
 IGNORE: Logos, letterheads, terms & conditions, signatures, stamps, irrelevant pages.
 
@@ -100,9 +105,12 @@ EXPECTED VALUES (use to locate correct test record):
 {field_hints}
 
 EXTRACTION GUIDELINES:
+- Extract ONLY fields explicitly listed under FIELDS TO FIND. Do not introduce additional score fields.
 - CANDIDATE NAME: Full name as printed
 - TEST DATE: When the test was taken
-- SCORES: Extract Total, Verbal, Quantitative scores with their percentiles. Note the scale (e.g., "out of 800").
+- SCORES: Extract the listed score and percentile fields exactly as printed. Note the scale when present.
+- GRE: Never calculate, infer, extract, or output a combined total score or total percentile. GRE uses Verbal, Quantitative, and Analytical Writing results independently.
+- GMAT/GMAT Focus: Extract a total score or total percentile only when that field is listed and explicitly printed.
 - Also extract AWA, IR if present
 - REGISTRATION/TEST ID: Any identification numbers
 - DO NOT CALCULATE scores - extract only explicitly printed values
@@ -114,9 +122,6 @@ For each field, write: FIELD_NAME: extracted_value
   → Context: quote the 1-2 lines where this value appears
 
 Example:
-Total_Score__c: 720
-  → Context: "Total Score: 720 out of 800 (94th percentile)"
-
 Verbal_Score__c: 38
   → Context: "Verbal Reasoning: 38 (85th percentile)"
 
@@ -187,7 +192,7 @@ If not found, write: ITEM: NOT_FOUND
 INTEGRATION_FIELDS = {
     'Id', 'recordId', 'Task_Id', 'triggeringLogId', 'DocumentchecklistItem_Id',
     'Applicant__c', 'Contact', 'Application__c', 'type', 'attributes',
-    'CreatedDate', 'CreatedById', 'LastModifiedById', 'SystemModstamp',
+    'CreatedDate', 'CreatedById', 'LastModifiedDate', 'LastModifiedById', 'SystemModstamp',
     'IsDeleted', 'OwnerId'
 }
 

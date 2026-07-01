@@ -58,7 +58,7 @@ async def process_single_test_score_detail(
 
     try:
         details = await asyncio.to_thread(
-            sf_service.get_record_detail_from_apex, test_score_id, TEST_SCORE_OBJECT_API_NAME
+            sf_service.get_test_score_record_data, test_score_id, parent_application_id
         )
         
         record_data = details.get("recordData", {})

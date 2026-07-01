@@ -1,31 +1,42 @@
 import logging
+import json
 from typing import Dict, Any, List
 from langgraph.graph import StateGraph, END
 
-from app.config import MODEL_COMPLEX_REASONING, TEMP_COMPLEX_REASONING, MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS
+from app.config import MODEL_COMPLEX_REASONING, TEMP_COMPLEX_REASONING, LLM_FIELD_EXCLUSIONS
 from app.langgraph.graph_prompts import (
     EDUCATION_DATA_COMPARATOR_AGENT_GOAL, EDUCATION_DATA_COMPARATOR_AGENT_BACKSTORY,
-    FINAL_REPORT_GENERATOR_AGENT_GOAL, FINAL_REPORT_GENERATOR_AGENT_BACKSTORY,
-    EDUCATION_DATA_COMPARISON_TASK_DESCRIPTION, FINAL_REPORT_GENERATION_TASK_DESCRIPTION,
-    EDUCATION_DATA_COMPARISON_EXPECTED_OUTPUT, FINAL_REPORT_GENERATION_EXPECTED_OUTPUT,
+    EDUCATION_DATA_COMPARISON_TASK_DESCRIPTION,
+    EDUCATION_DATA_COMPARISON_EXPECTED_OUTPUT,
 )
 from app.langgraph.state import VerificationState
 from app.langgraph.graph_utils import (
-    get_llm, parse_json_from_response,
-    format_record_for_llm, format_fields_for_llm, format_comparison_for_reporter,
+    get_llm, format_record_for_llm, format_fields_for_llm,
 )
+from app.langgraph.report_builder import build_verification_report, parse_comparison_json
 from app.langgraph.schemas import ValidatedCrewReport
 
 logger = logging.getLogger(__name__)
 
-# EEDL Education__c fields to exclude — no Apex lookup fields or internal IDs
-EEDL_EDU_FIELDS_TO_EXCLUDE: List[str] = ['Id', 'LastModifiedDate']
+EEDL_EDU_FIELDS_TO_EXCLUDE: List[str] = LLM_FIELD_EXCLUSIONS
+
+_EEDL_EDUCATION_CRITICAL_FIELDS = {
+    "Degree_Type__c",
+    "Degree Type",
+    "University_Name__c",
+    "University Name",
+    "GPA__c",
+    "GPA",
+    "From__c",
+    "From",
+    "To__c",
+    "To",
+}
 
 
 class EEDLEducationGraphNodes:
     def __init__(self):
         self.llm_comparator = get_llm(MODEL_COMPLEX_REASONING, TEMP_COMPLEX_REASONING)
-        self.llm_reporter = get_llm(MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS)
 
     def comparator_node(self, state: VerificationState) -> Dict[str, Any]:
         logger.info("Executing EEDL Education Comparator Node")
@@ -45,25 +56,36 @@ TASK:
 EXPECTED OUTPUT:
 {EDUCATION_DATA_COMPARISON_EXPECTED_OUTPUT}
 """
-        response = self.llm_comparator.invoke(prompt)
-        return {"comparison_task_output": response.content}
+        comparisons = None
+        for attempt in range(2):
+            response = self.llm_comparator.invoke(prompt)
+            try:
+                comparisons = parse_comparison_json(response.content)
+                break
+            except ValueError:
+                if attempt == 1:
+                    raise
+                logger.warning("EEDL Education comparator returned malformed JSON; retrying once")
+                prompt += (
+                    "\n\nRETRY REQUIREMENT: Your previous response was not valid JSON. "
+                    "Return only the required JSON object with `verification_analysis_report` and no surrounding prose."
+                )
+
+        return {
+            "comparison_task_output": json.dumps(
+                {"verification_analysis_report": comparisons},
+                ensure_ascii=False,
+            )
+        }
 
     def reporter_node(self, state: VerificationState) -> Dict[str, Any]:
         logger.info("Executing EEDL Education Reporter Node")
-        formatted_context = format_comparison_for_reporter(state['comparison_task_output'])
-        prompt = f"""
-{FINAL_REPORT_GENERATOR_AGENT_GOAL}
-{FINAL_REPORT_GENERATOR_AGENT_BACKSTORY}
-
-TASK:
-{FINAL_REPORT_GENERATION_TASK_DESCRIPTION.format(context=formatted_context)}
-
-EXPECTED OUTPUT:
-{FINAL_REPORT_GENERATION_EXPECTED_OUTPUT}
-"""
-        response = self.llm_reporter.invoke(prompt)
         try:
-            final_json = parse_json_from_response(response.content)
+            comparisons = parse_comparison_json(state['comparison_task_output'])
+            final_json = build_verification_report(
+                comparisons,
+                critical_field_names=_EEDL_EDUCATION_CRITICAL_FIELDS,
+            )
             validated = ValidatedCrewReport(**final_json)
             return {"final_report": validated.model_dump()}
         except Exception as e:
@@ -99,7 +121,7 @@ class EEDLEducationGraphOrchestrator:
             usage_metrics={},
             model_config={
                 "comparator_model": MODEL_COMPLEX_REASONING,
-                "reporter_model": MODEL_HTML_SYNTHESIS,
+                "reporter_model": "deterministic-python",
             },
         )
         result_state = self.app.invoke(initial_state)

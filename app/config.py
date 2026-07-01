@@ -10,9 +10,6 @@ APP_TITLE: str = "Salesforce Document Text Extraction and Application Analysis A
 APP_DESCRIPTION: str = "API for extracting information from document text and analyzing Salesforce application records."
 APP_VERSION: str = "2.0.0" # Production-grade architecture with process isolation, best-in-class observability, and fault tolerance
 
-# --- Logging Configuration ---
-LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
-
 # --- Salesforce Configuration ---
 SALESFORCE_ORGS: Dict[str, Dict[str, Any]] = {
     "dev": {
@@ -55,7 +52,7 @@ AVS_TEST_LOOKUP_FIELD: str = "Test__c"
 AVS_AFFILIATION_LOOKUP_FIELD: str = "Affiliation__c"
 AVS_REPORT_FIELD: str = "Verification_Analysis_Report__c"
 AVS_NAME_FIELD: str = "Name"
-AVS_OVERALL_FEEDBACK_FIELD: str = "Overall_feedback__c"
+AVS_OVERALL_FEEDBACK_FIELD: str = "Overall_Feedback__c"
 AVS_MISMATCHED_LIST_FIELD: str = "Mismatched_Field_List__c"
 AVS_CONFIDENCE_FIELD: str = "Percentage_Confidence__c"
 AVS_TASK_DCI_LOOKUP_FIELD: str = "Application_Verification_Summary__c"
@@ -63,10 +60,10 @@ APPLICATION_OBJECT_API_NAME: str = "hed__Application__c"
 APPLICATION_CONTACT_LOOKUP_FIELD_ON_APP: str = os.getenv("APPLICATION_CONTACT_LOOKUP_FIELD_ON_APP", "Applicant__c")
 EDUCATION_LOG_OBJECT_API_NAME: str = "ISB_Education_Log__c"
 EDUCATION_LOG_FIELD_TO_PARENT_APP: str = "Application__c"
-EDUCATION_LOG_FIELD_TO_DETAIL: str = "Education_History__c"
+
 EMPLOYMENT_LOG_OBJECT_API_NAME: str = "ISB_Employment_Log__c"
 EMPLOYMENT_LOG_FIELD_TO_PARENT_APP: str = "Application__c"
-EMPLOYMENT_LOG_FIELD_TO_DETAIL: str = "Affiliation__c"
+
 TEST_SCORE_OBJECT_API_NAME: str = "hed__Test__c"
 TEST_SCORE_LOOKUP_TO_PARENT_APP: str = "Application__c"
 # NEW: DocumentChecklistItem fields
@@ -81,6 +78,29 @@ READABLE_OBJECT_NAMES: Dict[str, str] = {
     TEST_SCORE_OBJECT_API_NAME: "Test Score Records",
     DCI_OBJECT_API_NAME: "Resume Detail"
 }
+
+# -----------------------------------------------------------------------
+# --- LLM Field Exclusions (single source of truth) ----------------------
+# -----------------------------------------------------------------------
+# Fields in this list are NEVER passed to the LLM for document verification.
+# They are still available in record_data for skip-logic, automation, and
+# any other server-side operations — exclusion only applies at the LLM boundary.
+#
+# Two categories merged into one list:
+#   1. Internal routing / lookup fields  — Salesforce IDs and trigger metadata
+#      that carry no verifiable meaning against a physical document.
+#   2. Standard Salesforce system fields — auto-populated by the platform
+#      (timestamps, audit IDs) that will never appear on any document.
+LLM_FIELD_EXCLUSIONS: List[str] = [
+    # --- Internal routing & lookup fields ---
+    'Id', 'type', 'recordId', 'Task_Id', 'triggeringLogId',
+    'DocumentchecklistItem_Id', 'Applicant__c', 'Contact', 'ContactId',
+    # --- Standard Salesforce system / metadata fields ---
+    'LastModifiedDate', 'LastModifiedById',
+    'CreatedDate', 'CreatedById',
+    'SystemModstamp', 'IsDeleted',
+    'LastActivityDate', 'LastViewedDate', 'LastReferencedDate',
+]
 
 # -----------------------------------------------------------------------
 # --- EEDL Module Configuration (Executive Education & Digital Learning) --
@@ -179,12 +199,11 @@ EEDL_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
     },
 ]
 
-# Apex REST Endpoint paths
+# Apex REST Endpoint paths (migrated: Test Score now uses Python-side SF service)
 APEX_ENDPOINT_PATHS: Dict[str, str] = {
     EDUCATION_LOG_OBJECT_API_NAME: "documentVerification/education",
     EMPLOYMENT_LOG_OBJECT_API_NAME: "documentVerification/employment",
     APPLICATION_OBJECT_API_NAME: "documentVerification/application",
-    TEST_SCORE_OBJECT_API_NAME: "documentVerification/testscore",
 }
 
 # --- Google Gemini Configuration ---
@@ -223,30 +242,6 @@ GEMINI_DEFAULT_PRICING: Dict[str, float] = {
 LONG_CONTEXT_THRESHOLD: int = 200000
 
 # --- Multimodal Token Calculation ---
-# Gemini tokenizes images/audio/video into tokens for billing
-# Source: https://ai.google.dev/gemini-api/docs/pricing
-MULTIMODAL_TOKEN_CONFIG: Dict[str, Any] = {
-    "image": {
-        "tokens_per_image_1k": 560,     # ~560 tokens per image up to 1024x1024
-        "tokens_per_image_2k": 1120,    # ~1120 tokens per image up to 2048x2048
-        "tokens_per_image_4k": 2000,    # ~2000 tokens per image up to 4096x4096
-        "default_tokens": 560,          # Default for typical document images
-    },
-    "audio": {
-        "tokens_per_second": 25,        # 25 tokens per second of audio
-    },
-    "video": {
-        "tokens_per_second": 258,       # 258 tokens per second of video (1 fps)
-    },
-    "pdf": {
-        # PDFs are converted to images, so each page = image tokens
-        "tokens_per_page": 560,         # Approximate tokens per PDF page (converted to image)
-    },
-}
-
-# --- AI Crew Configuration ---
-CONFIDENCE_PICKLIST_RANGES: List[str] = [ '100', '90 to 99', '80 to 90', '40 to 80', '0 to 40' ]
-
 # --- API Rate Limiting and Processing Configuration ---
 # SIMPLIFIED: Single source of truth for capacity management
 MAX_CONCURRENT_PROCESSING_SLOTS: int = int(os.getenv("MAX_CONCURRENT_PROCESSING_SLOTS", "15"))
@@ -350,7 +345,6 @@ RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
 
 # --- Text Extraction Prompts ---
 MAX_SALESFORCE_REPORT_LENGTH: int = 131072
-MAX_CONCURRENT_OCR_PAGES: int = int(os.getenv("MAX_CONCURRENT_OCR_PAGES", "20"))
 RAW_OCR_PROMPT = """
 You are a high-precision Optical Character Recognition (OCR) engine. Your only task is to transcribe ALL text from the provided image, exactly as it appears. Maintain the original spatial layout as best as possible. Do not interpret, format, or analyze the content. Output only the raw, transcribed text.
 """

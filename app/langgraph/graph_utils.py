@@ -3,13 +3,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 from langchain_google_genai import ChatGoogleGenerativeAI
-from app.config import (
-    CREW_GOOGLE_API_KEY, 
-    MODEL_STANDARD_VERIFICATION, 
-    TEMP_STANDARD_VERIFICATION,
-    MODEL_HTML_SYNTHESIS,
-    TEMP_HTML_SYNTHESIS
-)
+from app.config import CREW_GOOGLE_API_KEY
 # Reuse the existing interceptor-friendly LLM init from llm_utils
 from app.langgraph.llm_utils import initialize_llm, clean_and_extract_json
 

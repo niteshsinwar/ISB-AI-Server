@@ -1,44 +1,81 @@
 import logging
-import os
 import json
 from typing import Dict, Any, List
 from langgraph.graph import StateGraph, END
 
 from app.config import (
     MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION,
-    MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS
+    LLM_FIELD_EXCLUSIONS
 )
 from app.langgraph.graph_prompts import (
     TEST_SCORE_DATA_COMPARATOR_AGENT_GOAL,
     TEST_SCORE_DATA_COMPARATOR_AGENT_BACKSTORY,
-    FINAL_REPORT_GENERATOR_AGENT_GOAL,
-    FINAL_REPORT_GENERATOR_AGENT_BACKSTORY,
     TEST_SCORE_DATA_COMPARISON_TASK_DESCRIPTION,
-    FINAL_REPORT_GENERATION_TASK_DESCRIPTION,
     TEST_SCORE_DATA_COMPARISON_EXPECTED_OUTPUT,
-    FINAL_REPORT_GENERATION_EXPECTED_OUTPUT
 )
 from app.langgraph.state import VerificationState
 from app.langgraph.graph_utils import (
-    get_llm, parse_json_from_response,
-    format_record_for_llm, format_fields_for_llm, format_comparison_for_reporter
+    get_llm, format_record_for_llm, format_fields_for_llm
 )
+from app.langgraph.report_builder import build_verification_report, parse_comparison_json
 from app.langgraph.schemas import ValidatedCrewReport
 
 logger = logging.getLogger(__name__)
 
-# Fields to Exclude from Test Score verification
-FIELDS_TO_EXCLUDE_FROM_PROCESSING: List[str] = [
-    'Applicant__c', 'type', 'Contact', 'recordId', 'Task_Id',
-    'triggeringLogId', 'Id', 'DocumentchecklistItem_Id', 'Test_Mode'
+# Test_Mode is graph-specific: used for early-exit automation, excluded from LLM
+# Additional exclusions: internal hed__Test__c fields not verifiable from a test scorecard
+_TEST_SCORE_INTERNAL_FIELDS: List[str] = [
+    # ISB / application metadata
+    'Applicant_Test_Status__c', 'Cohort_Name__c', 'Program_Name__c',
+    'Consider_for_calculation__c', 'More_than_onces__c', 'Repeated__c',
+    'ReportISBScoreBoard__c', 'Status__c',
+    # Salesforce object internals
+    'OwnerId', 'RecordTypeId', 'Name',
+    # Lookup IDs (non-verifiable foreign keys)
+    'Application__c', 'Test_Score__c',
+    # EDA / HED internal fields
+    'hed__Credentialing_Identifier__c', 'hed__Credits_Earned__c',
+    'hed__Source__c', 'hed__Verification_Status__c', 'hed__Verification_Status_Date__c',
+    'hed__Test_Type__c', 'hed__Contact__c',
+    # Misc internal
+    'Location_ID__c', 'Probability__c', 'Appeared__c',
 ]
+FIELDS_TO_EXCLUDE_FROM_PROCESSING: List[str] = [*LLM_FIELD_EXCLUSIONS, 'Test_Mode', *_TEST_SCORE_INTERNAL_FIELDS]
+
+_TEST_SCORE_BASE_CRITICAL_FIELDS = {
+    "applicantName",
+    "Applicant_Name",
+    "Candidate_Name__c",
+    "RecordTypeName__c",
+    "testType",
+    "Test Type",
+    "hed__Test_Date__c",
+    "Test Date",
+    "Birthdate__c",
+    "Applicant_Birthdate",
+    "API_Birthdate",
+    "Registration_No",
+    "Registration_No__c",
+    "Test_ID",
+    "Test_ID__c",
+    "Email",
+    "Email__c",
+}
+
+
+def _test_score_critical_fields(record_data: Dict[str, Any]) -> set[str]:
+    critical = set(_TEST_SCORE_BASE_CRITICAL_FIELDS)
+    for field_name in record_data:
+        normalized = field_name.casefold()
+        if any(token in normalized for token in ("score", "percentile", "birthdate", "test_date", "registration", "test_id", "email")):
+            critical.add(field_name)
+    return critical
 
 
 class TestScoreGraphNodes:
     def __init__(self):
         # Using 2.5 Flash for LangGraph processing
         self.llm_comparator = get_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION)
-        self.llm_reporter = get_llm(MODEL_HTML_SYNTHESIS, TEMP_HTML_SYNTHESIS)
 
     def comparator_node(self, state: VerificationState) -> Dict[str, Any]:
         """
@@ -67,8 +104,27 @@ EXPECTED OUTPUT:
 {TEST_SCORE_DATA_COMPARISON_EXPECTED_OUTPUT}
 """
 
-        response = self.llm_comparator.invoke(prompt)
-        return {"comparison_task_output": response.content}
+        comparisons = None
+        for attempt in range(2):
+            response = self.llm_comparator.invoke(prompt)
+            try:
+                comparisons = parse_comparison_json(response.content)
+                break
+            except ValueError:
+                if attempt == 1:
+                    raise
+                logger.warning("Test Score comparator returned malformed JSON; retrying once")
+                prompt += (
+                    "\n\nRETRY REQUIREMENT: Your previous response was not valid JSON. "
+                    "Return only the required JSON object with `verification_analysis_report` and no surrounding prose."
+                )
+
+        return {
+            "comparison_task_output": json.dumps(
+                {"verification_analysis_report": comparisons},
+                ensure_ascii=False,
+            )
+        }
 
     def reporter_node(self, state: VerificationState) -> Dict[str, Any]:
         """
@@ -76,26 +132,12 @@ EXPECTED OUTPUT:
         """
         logger.info("Executing Test Score Reporter Node")
 
-        # Format comparison output for reporter
-        formatted_context = format_comparison_for_reporter(state['comparison_task_output'])
-
-        prompt = f"""
-{FINAL_REPORT_GENERATOR_AGENT_GOAL}
-{FINAL_REPORT_GENERATOR_AGENT_BACKSTORY}
-
-TASK:
-{FINAL_REPORT_GENERATION_TASK_DESCRIPTION.format(
-    context=formatted_context
-)}
-
-EXPECTED OUTPUT:
-{FINAL_REPORT_GENERATION_EXPECTED_OUTPUT}
-"""
-
-        response = self.llm_reporter.invoke(prompt)
-
         try:
-            final_json = parse_json_from_response(response.content)
+            comparisons = parse_comparison_json(state['comparison_task_output'])
+            final_json = build_verification_report(
+                comparisons,
+                critical_field_names=_test_score_critical_fields(state.get("record_data") or {}),
+            )
             validated = ValidatedCrewReport(**final_json)
             return {"final_report": validated.model_dump()}
         except Exception as e:
@@ -138,7 +180,7 @@ class TestScoreGraphOrchestrator:
             usage_metrics={},
             model_config={
                 "comparator_model": MODEL_STANDARD_VERIFICATION,
-                "reporter_model": MODEL_HTML_SYNTHESIS
+                "reporter_model": "deterministic-python"
             }
         )
 

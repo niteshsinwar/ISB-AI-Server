@@ -152,7 +152,19 @@ async def process_single_education_history_detail(
         # LangGraph Execution
         logger.info(f"Using LangGraph for {readable_name} {education_log_id}")
         from app.langgraph.education_graph import EducationGraphOrchestrator
-        edu_orchestrator = EducationGraphOrchestrator(record_data, document_text_string)
+
+        # Fetch application submission date for recency checks
+        app_submission_date = None
+        try:
+            app_details = await asyncio.to_thread(
+                sf_service.get_record_detail_from_apex, parent_application_id, "hed__Application__c"
+            )
+            if app_details:
+                app_submission_date = app_details.get("recordData", {}).get("hed__Application_Date__c")
+        except Exception as e:
+            logger.warning(f"Could not fetch application submission date: {e}")
+
+        edu_orchestrator = EducationGraphOrchestrator(record_data, document_text_string, app_submission_date)
         report_dict = await asyncio.to_thread(edu_orchestrator.run)
 
         if not report_dict:

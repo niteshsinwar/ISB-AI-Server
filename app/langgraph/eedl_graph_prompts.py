@@ -37,11 +37,12 @@ Your task is to verify an Aadhaar card or Passport document and extract citizens
    - Confidence: 90% for year-only match, -20% for significant error.
 
 5. **Citizenship / Nationality Extraction (MANDATORY)**:
-   - Aadhaar: Citizenship is implicitly "Indian" — set suggested_citizenship_value = "Indian"
-   - Passport: Extract the explicit "Nationality" field value from the document
-   - If nationality cannot be determined: set suggested_citizenship_value = null and note -10% confidence
+   - Aadhaar: Citizenship is implicitly "Indian" — return a Citizenship/Nationality row with document_value "Indian"
+   - Passport: Extract the explicit "Nationality" field value from the document into document_value
+   - If nationality cannot be determined: return document_value null and note -10% confidence
 
-**Output**: JSON array with `field_name`, `record_value`, `document_value`, `status`, `confidence`, `notes`, `is_critical`.
+**Output**: JSON object with `verification_analysis_report`, a child array containing `field_name`, `record_value`, `document_value`, `status`, `confidence`, and `notes`.
+Do not include any criticality flag; criticality and suggested citizenship are assigned by server-side business rules.
 """
 
 EEDL_CITIZENSHIP_COMPARATOR_BACKSTORY = """
@@ -55,11 +56,25 @@ Verify identity document details and extract citizenship information.
 - **Opportunity Record Data**: {record_data}
 - **Document Text**: {document_text}
 
-Output a JSON array. Pay special attention to extracting the citizenship/nationality value.
+Output only a valid JSON object. Pay special attention to extracting the citizenship/nationality value into the relevant row's `document_value`. Do not add prose before or after the JSON.
 """
 
 EEDL_CITIZENSHIP_COMPARISON_EXPECTED_OUTPUT = """
-A JSON array demonstrating identity verification with citizenship extraction:
+A JSON object only. It must use this exact contract:
+{{
+  "verification_analysis_report": [
+    {{
+      "field_name": "source field name",
+      "record_value": "value supplied in record data or null",
+      "document_value": "document value or null",
+      "status": "MATCH | MISMATCH | NOT_FOUND",
+      "confidence": 0-100,
+      "notes": "concise evidence"
+    }}
+  ]
+}}
+
+Requirements:
 - Name and DOB verified against record.
 - ID number validated per document type rules.
 - Citizenship/nationality explicitly identified and noted.
@@ -71,7 +86,7 @@ EEDL_CITIZENSHIP_REPORTER_GOAL = f"""
 You are a Report Synthesis Expert for EEDL identity verification.
 
 **Enhanced Logic** (same as standard reporter):
-- Confidence Calculation: Start at 100%. For each critical field (is_critical=true), subtract (100 - field_confidence) / 2.
+- Confidence Calculation: Start at 100%. Apply confidence impact only to fields the business rules identify as critical.
 - Status: "Passed" (≥80%), "Needs Review" (50-79%), "Failed" (<50%).
 
 **EEDL-Specific Addition**:
@@ -89,7 +104,7 @@ You are a Report Synthesis Expert for EEDL identity verification.
 - `overall_feedback`: Clear actionable summary
 - `confidence_range`: Final integer score 0-100
 - `verification_status`: "Passed", "Failed", or "Needs Review"
-- `mismatched_field_list`: Semicolon-separated "field:reason" pairs or "N/A"
+- `mismatched_field_list`: Semicolon-separated mismatched field names or "N/A"
 - `suggested_citizenship_value`: The nationality/citizenship string to write to Opportunity, or null
 """
 

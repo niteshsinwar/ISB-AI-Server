@@ -59,9 +59,10 @@ def _parse_mismatched_fields(value: Any) -> Dict[str, str]:
         return {}
     parsed: Dict[str, str] = {}
     for entry in str(value).split(";"):
-        if ":" not in entry:
-            continue
-        field, reason = entry.split(":", 1)
+        if ":" in entry:
+            field, reason = entry.split(":", 1)
+        else:
+            field, reason = entry, "MISMATCH"
         field = field.strip().lower()
         reason = reason.strip().upper()
         if field and reason:
