@@ -197,6 +197,36 @@ async def process_single_employment_detail(
 
         logger.info(f"Successfully processed {readable_name} {employment_log_id}. AVS ID: {summary_id}")
 
+        # Create tasks for task-worthy mismatches (company name, salary, etc.)
+        from app.core.task_builder import extract_task_worthy_mismatches, build_task_from_mismatch
+        task_worthy = extract_task_worthy_mismatches(report_dict, report_dict.get('mismatched_field_list', ''))
+
+        if task_worthy:
+            # Fetch the employment record's owner to assign tasks
+            employment_record = await asyncio.to_thread(
+                sf_service.sf.query,
+                f"SELECT OwnerId FROM hed__Affiliation__c WHERE Id = '{actual_employment_detail_id}' LIMIT 1"
+            )
+            owner_id = employment_record.get('records', [{}])[0].get('OwnerId') if employment_record.get('records') else None
+
+            for mismatch in task_worthy:
+                task_data = build_task_from_mismatch(
+                    field_name=mismatch['field_name'],
+                    record_value=mismatch['record_value'],
+                    document_value=mismatch['document_value'],
+                    notes=mismatch['notes'],
+                    confidence=mismatch['confidence'],
+                    dci_id=employment_log_id,
+                    application_id=parent_application_id,
+                    record_type_name="Employment",
+                )
+                await asyncio.to_thread(
+                    sf_service.create_verification_task,
+                    employment_log_id,
+                    task_data,
+                    owner_id,
+                )
+
     except SalesforceAPIError as e:
         error_msg = str(e)
         job_logger = get_job_logger()

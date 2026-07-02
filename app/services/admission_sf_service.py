@@ -243,6 +243,45 @@ class AdmissionSFMixin:
                 logger.error(f"Failed to update DocumentChecklistItem {dci_id}: {e}")
                 raise SalesforceAPIError(f"Failed to link summary {summary_id} to DCI {dci_id}: {e}")
 
+    def create_verification_task(
+        self,
+        dci_id: str,
+        task_data: Dict[str, Any],
+        owner_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Create a Salesforce Task for verification mismatches requiring manual review.
+
+        Args:
+            dci_id: DocumentChecklistItem ID (WhatId)
+            task_data: Dict with Subject, Description, Status, Priority
+            owner_id: User/Queue ID for WhoId (OwnerId)
+
+        Returns:
+            Task ID if created, None if owner_id is missing
+        """
+        from app.services.salesforce_service import SalesforceAPIError
+
+        if not owner_id:
+            logger.warning(f"Cannot create task for DCI {dci_id}: no owner_id (Checklist_Verification_Assigned_To field not populated)")
+            return None
+
+        self._ensure_connected()
+
+        try:
+            task_record = {
+                **task_data,
+                "WhatId": dci_id,
+                "OwnerId": owner_id,
+            }
+            task_handler = getattr(self.sf, 'Task')
+            task_id = self._call_sf_api_with_retry(lambda: task_handler.create(task_record))
+            logger.info(f"Created verification task {task_id} for DCI {dci_id}, assigned to {owner_id}")
+            return task_id
+        except Exception as e:
+            logger.error(f"Failed to create task for DCI {dci_id}: {e}")
+            raise SalesforceAPIError(f"Failed to create verification task: {e}")
+
     # -----------------------------------------------------------------------
     # Existing AVS metadata (for skip-logic)
     # -----------------------------------------------------------------------

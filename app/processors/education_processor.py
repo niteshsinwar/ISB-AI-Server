@@ -199,6 +199,36 @@ async def process_single_education_history_detail(
         
         logger.info(f"Successfully processed {readable_name} {education_log_id}. AVS ID: {summary_id}")
 
+        # Create tasks for task-worthy mismatches (college name, cgpa, etc.)
+        from app.core.task_builder import extract_task_worthy_mismatches, build_task_from_mismatch
+        task_worthy = extract_task_worthy_mismatches(report_dict, report_dict.get('mismatched_field_list', ''))
+
+        if task_worthy:
+            # Fetch the education record's owner to assign tasks
+            education_record = await asyncio.to_thread(
+                sf_service.sf.query,
+                f"SELECT OwnerId FROM hed__Course_Enrollment__c WHERE Id = '{actual_education_detail_id}' LIMIT 1"
+            )
+            owner_id = education_record.get('records', [{}])[0].get('OwnerId') if education_record.get('records') else None
+
+            for mismatch in task_worthy:
+                task_data = build_task_from_mismatch(
+                    field_name=mismatch['field_name'],
+                    record_value=mismatch['record_value'],
+                    document_value=mismatch['document_value'],
+                    notes=mismatch['notes'],
+                    confidence=mismatch['confidence'],
+                    dci_id=education_log_id,
+                    application_id=parent_application_id,
+                    record_type_name="Education",
+                )
+                await asyncio.to_thread(
+                    sf_service.create_verification_task,
+                    education_log_id,
+                    task_data,
+                    owner_id,
+                )
+
     except SalesforceAPIError as e:
         error_msg = str(e)
         job_logger = get_job_logger()
