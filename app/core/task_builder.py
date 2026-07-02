@@ -23,6 +23,8 @@ FIELD_NAME_NORMALIZATION = {
     "College Name": "college_name",
     "Institute": "college_name",
     "Institution": "college_name",
+    "Institution Name": "college_name",
+    "Institution_Name__c": "college_name",
     "CGPA": "cgpa",
     "GPA": "cgpa",
     "Percentage": "cgpa",
