@@ -183,10 +183,25 @@ def build_verification_report(
     *,
     critical_field_names: Optional[Iterable[str]] = None,
     extra_fields: Optional[Dict[str, Any]] = None,
+    allowed_fields: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Build the complete report contract without a synthesis LLM call."""
     if not comparisons:
         raise ValueError("Cannot build a report without comparison results")
+
+    # Server-side safety net: drop any LLM-hallucinated rows for fields not in
+    # the verifiable_fields list (e.g. "Last Modified Date" from document metadata).
+    if allowed_fields is not None:
+        allowed_set = set(allowed_fields)
+        # Always allow explicitly injected LLM reporting fields
+        allowed_set.add("Number of Semesters")
+        
+        comparisons = [
+            item for item in comparisons
+            if item.get("field_name") in allowed_set
+        ]
+        if not comparisons:
+            raise ValueError("All comparison rows were filtered out by allowed_fields")
 
     comparisons = _apply_critical_field_map(comparisons, critical_field_names)
 
