@@ -109,6 +109,9 @@ Verify personal details with business-focused intelligence.
 - **Fields**: {verifiable_fields}
 - **Record Data**: {record_data}
 - **Document Text**: {document_text}
+
+**STRICT SCOPE**: Produce verification rows ONLY for the fields listed above. Do NOT add rows for any other field — especially not metadata fields like "Last Modified Date", "Created Date", "System Modstamp", or any date/time stamps that are clearly system-generated rather than personal identity data. If the document contains such metadata, ignore it completely.
+
 Output only a valid JSON object emphasizing evidence-based field comparisons and showing leniency for minor, common-sense issues. Do not add prose before or after the JSON.
 """
 
@@ -182,9 +185,14 @@ You are an Employment Verification Specialist with deep business intelligence.
       - 1 EUR ≈ ₹101.05
       - 1 AED ≈ ₹23.52
       - INR = 1
-    * **Normalize to INR**:  
-      - Convert amounts using above rates.  
-      - If document pay is monthly, annualize by ×12.
+    * **Comprehensive Compensation Analysis (Multiple Payslips & Bonuses)**:
+      - If the document contains multiple payslips, scan ALL of them.
+      - Actively search for "Joining Bonus", "Sign-on Bonus", "Annual Bonus", "Performance Pay", or "Variable Pay".
+      - Check Year-To-Date (YTD) columns for bonuses that may not be in the current month's regular pay.
+    * **Normalize to INR & Annualize**:  
+      - Convert all amounts using above rates.  
+      - Formula: `(Monthly Fixed Pay × 12) + Total Variable/Bonus Components`.
+      - If the calculated total matches the applicant's entered salary, consider it a MATCH.
     * **Apply ±3% variance** to account for benefits/rounding.
     * **Compare normalized salaries**:
       ```
@@ -228,6 +236,9 @@ Verify employment details with corporate awareness.
 - **Fields**: {verifiable_fields}
 - **Record Data**: {record_data}
 - **Document Text**: {document_text}
+
+**STRICT SCOPE**: Produce verification rows ONLY for the fields listed above. Do NOT add rows for any other field — especially not metadata fields like "Last Modified Date", "Created Date", "System Modstamp", or any date/time stamps that are clearly system-generated rather than employment data. If the document contains such metadata, ignore it completely.
+
 Output only a valid JSON object focusing on evidence-based field comparisons and ignoring irrelevant data like work duration. Do not add prose before or after the JSON.
 """
 
@@ -411,6 +422,9 @@ Verify education details with academic intelligence.
 - **Fields**: {verifiable_fields}
 - **Record Data**: {record_data}
 - **Document Text**: {document_text}
+
+**STRICT SCOPE**: Produce verification rows ONLY for the fields listed above. Do NOT add rows for any other field — especially not metadata fields like "Last Modified Date", "Created Date", "System Modstamp", or any date/time stamps that are clearly system-generated rather than academic data. If the document contains such metadata, ignore it completely.
+
 Output only a valid JSON object with detailed GPA analysis and inferred dates where necessary. Do not add prose before or after the JSON.
 Always include separate rows for `Degree/Qualification`, `SF Field of Study`, and `Major/Specialization` when those fields are supplied in the record.
 Never substitute `Major/Specialization` for `SF Field of Study`.
