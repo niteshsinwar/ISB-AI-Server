@@ -44,7 +44,8 @@ _EMPLOYMENT_CRITICAL_FIELDS = {
 
 def _route_after_classification(state: VerificationState) -> Literal["bank_statement_reporter", "comparator"]:
     """Conditional edge: route bank statements away from the normal comparator."""
-    if state.get("document_type") == "BANK_STATEMENT":
+    doc_type = state.get("document_type", "")
+    if doc_type in ["BANK_STATEMENT", "BANK STATEMENT"]:
         return "bank_statement_reporter"
     return "comparator"
 
@@ -95,24 +96,24 @@ TASK:
         report_dict = build_verification_report(
             [
                 {
-                    "field_name": "Document_Type",
-                    "record_value": "PAYSLIP",
-                    "document_value": "BANK_STATEMENT",
+                    "field_name": "Payslip",
+                    "record_value": "Required",
+                    "document_value": "Bank Statement",
                     "status": "MISMATCH",
-                    "confidence": 20,
-                    "notes": reasoning,
+                    "confidence": 0,
+                    "notes": f"Bank statement submitted instead of a Payslip. Rejected without further parameter checks. Reason: {reasoning}",
                     "_is_critical": True,
                 }
             ]
         )
         report_dict["overall_feedback"] = (
-            "Document type mismatch: A Bank Statement was submitted instead of a Payslip or "
-            "employment proof document. Bank statements cannot verify employer name, job title, "
-            "designation, or employment dates. Only salary/compensation can be partially inferred. "
+            "Document type mismatch: A Bank Statement was submitted instead of a Payslip. "
+            "Verification rejected as bank statements cannot verify employer name, job title, "
+            "or employment dates. "
             f"Classifier reasoning: {reasoning}"
         )
-        report_dict["confidence_range"] = 20
-        report_dict["overall_percentage_confidence"] = 20
+        report_dict["confidence_range"] = 0
+        report_dict["overall_percentage_confidence"] = 0
         report_dict["verification_status"] = "Failed"
         report = ValidatedCrewReport(**report_dict)
         return {"final_report": report.model_dump()}
@@ -178,6 +179,7 @@ EXPECTED OUTPUT:
             final_json = build_verification_report(
                 comparisons,
                 critical_field_names=_EMPLOYMENT_CRITICAL_FIELDS,
+                allowed_fields=state.get('verifiable_fields'),
             )
             validated = ValidatedCrewReport(**final_json)
             return {"final_report": validated.model_dump()}
