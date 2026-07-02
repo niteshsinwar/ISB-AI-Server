@@ -30,11 +30,14 @@ FIELDS_TO_EXCLUDE_FROM_PROCESSING: List[str] = LLM_FIELD_EXCLUSIONS
 _ID_DOCUMENT_FIELD_MAP = {
     "PASSPORT": {
         "Passport", "Passport Number", "Passport_Number__c", "Passport Number__c",
-        "Passport Expiry", "Passport_Expiry__c", "Expiry Date", "Nationality"
+        "Passport Expiry", "Passport_Expiry__c", "Expiry Date", "Nationality",
+        "Passport Details"
     },
     "AADHAAR": {
         "Aadhaar", "Aadhar", "Aadhaar Number", "Aadhar Number", "Aadhar Card Number",
-        "Aadhaar Card Number", "Aadhar_Number__c", "Aadhaar_Number__c"
+        "Aadhaar Card Number", "Aadhar_Number__c", "Aadhaar_Number__c", "Adhaar",
+        "Adhaar Number", "Adhaar Card Details", "Aadhar Card Details", "Adhaar_Number__c",
+        "Adhaar_Card_Number__c"
     },
     "DRIVING_LICENSE": {
         "Driving License", "License Number", "License_Number__c", "Driving_License__c",
@@ -169,9 +172,17 @@ EXPECTED OUTPUT:
 
         try:
             comparisons = parse_comparison_json(state['comparison_task_output'])
+            
+            # Recalculate filtered fields so hallucinated irrelevant ID fields are dropped
+            filtered_fields = _filter_fields_by_document_type(
+                state['verifiable_fields'],
+                state.get('document_type')
+            )
+            
             final_json = build_verification_report(
                 comparisons,
                 critical_field_names=_APPLICATION_CRITICAL_FIELDS,
+                allowed_fields=filtered_fields,
             )
             validated = ValidatedCrewReport(**final_json)
             return {"final_report": validated.model_dump()}
