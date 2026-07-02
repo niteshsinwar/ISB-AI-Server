@@ -3,9 +3,9 @@ import logging
 from typing import Any, Dict, Optional
 
 from langgraph.graph import StateGraph, START, END
-from langchain_google_genai import ChatGoogleGenerativeAI
 
-from app.langgraph.state import VerificationState
+from app.langgraph.state import RecommenderState
+from app.langgraph.graph_utils import get_llm
 from app.langgraph.graph_prompts import (
     RECOMMENDER_SUBMISSION_VALIDATOR_GOAL,
     RECOMMENDER_SUBMISSION_VALIDATOR_TASK,
@@ -42,11 +42,11 @@ class RecommenderGraphOrchestrator:
         self.recommender_record = recommender_record
         self.responses = responses
         self.applicant_personal_detail = applicant_personal_detail
-        self.llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7)
+        self.llm = get_llm("gemini-2.0-flash", 0.7)
 
     def build_graph(self):
         """Build the verification graph."""
-        graph = StateGraph(VerificationState)
+        graph = StateGraph(RecommenderState)
 
         # Node 1: Submission Check (Deterministic)
         graph.add_node("submission_validator", self._submission_validator_node)
@@ -69,15 +69,14 @@ class RecommenderGraphOrchestrator:
         # Add edges
         graph.add_edge(START, "submission_validator")
         graph.add_edge("submission_validator", "email_classifier")
-        graph.add_edge("email_classifier", "name_matcher")
 
-        # Conditional edge: if personal email, analyze reason
+        # Conditional edge: if personal email, analyze reason first, then name_matcher
         def route_personal_email(state):
             return "personal_email_analyzer" if state.get("email_type") == "personal" else "name_matcher"
 
         graph.add_conditional_edges("email_classifier", route_personal_email)
 
-        graph.add_edge("personal_email_analyzer", "family_relationship_detector")
+        graph.add_edge("personal_email_analyzer", "name_matcher")
 
         # Conditional edge: if last name matches, check family relationship
         def route_family_check(state):
@@ -90,7 +89,7 @@ class RecommenderGraphOrchestrator:
 
         return graph.compile()
 
-    def _submission_validator_node(self, state: VerificationState) -> VerificationState:
+    def _submission_validator_node(self, state: RecommenderState) -> RecommenderState:
         """
         NODE 1 (DETERMINISTIC): Validate if recommendation is submitted.
 
@@ -115,7 +114,7 @@ class RecommenderGraphOrchestrator:
 
         return state
 
-    def _email_classifier_node(self, state: VerificationState) -> VerificationState:
+    def _email_classifier_node(self, state: RecommenderState) -> RecommenderState:
         """
         NODE 2 (DETERMINISTIC): Classify email as personal or corporate.
 
@@ -154,30 +153,42 @@ class RecommenderGraphOrchestrator:
 
         return state
 
-    def _name_matcher_node(self, state: VerificationState) -> VerificationState:
+    def _name_matcher_node(self, state: RecommenderState) -> RecommenderState:
         """
-        NODE 3 (DETERMINISTIC): Match recommender and applicant names.
+        NODE 3 (DETERMINISTIC): Match recommender and applicant names & contact info.
 
         Checks:
         - First name exact match (case-insensitive)
         - Last name exact match (case-insensitive)
         - If last name matches, flag potential family relationship
+        - Email exact match (highly suspicious)
+        - Mobile exact match (highly suspicious)
         """
-        logger.info("Running name matcher node")
+        logger.info("Running contact/name matcher node")
 
         recommender_first = (self.recommender_record.get("First_Name__c") or "").strip().lower()
         recommender_last = (self.recommender_record.get("Last_Name__c") or "").strip().lower()
+        recommender_email = (self.recommender_record.get("Email__c") or "").strip().lower()
+        recommender_mobile = (self.recommender_record.get("Mobile__c") or "").strip()
 
         # Extract applicant name from personal detail record
         applicant_first = ""
         applicant_last = ""
+        applicant_email = ""
+        applicant_mobile = ""
 
         if self.applicant_personal_detail:
             applicant_first = (self.applicant_personal_detail.get("First_Name__c") or "").strip().lower()
             applicant_last = (self.applicant_personal_detail.get("Last_Name__c") or "").strip().lower()
+            applicant_email = (self.applicant_personal_detail.get("Email") or "").strip().lower()
+            applicant_mobile = (self.applicant_personal_detail.get("MobilePhone") or "").strip()
 
         first_name_match = recommender_first == applicant_first and recommender_first != ""
         last_name_match = recommender_last == applicant_last and recommender_last != ""
+        
+        # Cross-contact matching
+        email_match = recommender_email == applicant_email and recommender_email != ""
+        mobile_match = recommender_mobile == applicant_mobile and recommender_mobile != ""
 
         state["recommender_first_name"] = recommender_first
         state["recommender_last_name"] = recommender_last
@@ -185,6 +196,8 @@ class RecommenderGraphOrchestrator:
         state["applicant_last_name"] = applicant_last
         state["first_name_match"] = first_name_match
         state["last_name_match"] = last_name_match
+        state["email_match"] = email_match
+        state["mobile_match"] = mobile_match
 
         state["findings"].append({
             "field": "first_name_match",
@@ -204,6 +217,28 @@ class RecommenderGraphOrchestrator:
             "type": "deterministic"
         })
 
+        if email_match:
+            logger.warning(f"⚠️ SUSPICIOUS: Recommender email matches Applicant email ({recommender_email})")
+            state["findings"].append({
+                "field": "email_cross_match",
+                "check": "Email matching candidate",
+                "result": "MATCH (SUSPICIOUS)",
+                "recommender": recommender_email,
+                "applicant": applicant_email,
+                "type": "deterministic"
+            })
+
+        if mobile_match:
+            logger.warning(f"⚠️ SUSPICIOUS: Recommender mobile matches Applicant mobile ({recommender_mobile})")
+            state["findings"].append({
+                "field": "mobile_cross_match",
+                "check": "Mobile matching candidate",
+                "result": "MATCH (SUSPICIOUS)",
+                "recommender": recommender_mobile,
+                "applicant": applicant_mobile,
+                "type": "deterministic"
+            })
+
         if last_name_match and not first_name_match:
             state["potential_family_flag"] = True
             logger.warning(f"⚠️ POTENTIAL FAMILY RELATIONSHIP: Last names match but first names differ")
@@ -212,7 +247,7 @@ class RecommenderGraphOrchestrator:
 
         return state
 
-    def _personal_email_analyzer_node(self, state: VerificationState) -> VerificationState:
+    def _personal_email_analyzer_node(self, state: RecommenderState) -> RecommenderState:
         """
         NODE 4 (LLM): Analyze reason for using personal email.
 
@@ -271,7 +306,7 @@ Provide:
 
         return state
 
-    def _family_relationship_detector_node(self, state: VerificationState) -> VerificationState:
+    def _family_relationship_detector_node(self, state: RecommenderState) -> RecommenderState:
         """
         NODE 5 (LLM): Detect if recommender is likely a family member.
 
@@ -365,7 +400,7 @@ Provide:
 
         return state
 
-    def _report_builder_node(self, state: VerificationState) -> VerificationState:
+    def _report_builder_node(self, state: RecommenderState) -> RecommenderState:
         """
         NODE 6 (DETERMINISTIC): Build comprehensive report.
 
@@ -388,11 +423,16 @@ Provide:
             summary_parts.append(f"\nPersonal Email Reason Analysis:\n{state.get('personal_email_reason', 'Analysis not performed')}")
 
         # Name matching
-        summary_parts.append(f"\nName Matching:")
+        summary_parts.append(f"\nContact and Name Matching:")
         summary_parts.append(f"  Recommender Name: {state.get('recommender_first_name')} {state.get('recommender_last_name')}")
         summary_parts.append(f"  Applicant Name: {state.get('applicant_first_name')} {state.get('applicant_last_name')}")
         summary_parts.append(f"  First Name Match: {'Yes' if state.get('first_name_match') else 'No'}")
         summary_parts.append(f"  Last Name Match: {'Yes' if state.get('last_name_match') else 'No'}")
+        
+        if state.get('email_match'):
+            summary_parts.append(f"  Email Match: YES (Highly Suspicious)")
+        if state.get('mobile_match'):
+            summary_parts.append(f"  Mobile Match: YES (Highly Suspicious)")
 
         # Family relationship (if last name match)
         if state.get('last_name_match'):
@@ -410,6 +450,12 @@ Provide:
 
         if state.get('email_type') == 'personal':
             feedback_parts.append("ℹ️ Recommender used personal email address instead of corporate email.")
+            
+        if state.get('email_match'):
+            feedback_parts.append("🛑 FRAUD ALERT: Recommender email matches Applicant email.")
+            
+        if state.get('mobile_match'):
+            feedback_parts.append("🛑 FRAUD ALERT: Recommender mobile matches Applicant mobile.")
 
         if state.get('last_name_match') and state.get('family_relationship_probability') in ['Medium', 'High']:
             feedback_parts.append(f"⚠️ POTENTIAL FAMILY RELATIONSHIP DETECTED: {state.get('family_relationship_probability')} probability based on name matching and content analysis.")
@@ -427,6 +473,11 @@ Provide:
             confidence -= 30
         elif state.get('family_relationship_probability') == 'Medium':
             confidence -= 15
+            
+        if state.get('email_match'):
+            confidence -= 50
+        if state.get('mobile_match'):
+            confidence -= 50
 
         confidence = max(0, min(confidence, 100))
 
@@ -438,6 +489,10 @@ Provide:
             mismatched_fields.append('name_match_detected')
         if state.get('family_relationship_probability') in ['Medium', 'High']:
             mismatched_fields.append('family_relationship_suspected')
+        if state.get('email_match'):
+            mismatched_fields.append('email_cross_match_fraud')
+        if state.get('mobile_match'):
+            mismatched_fields.append('mobile_cross_match_fraud')
 
         mismatched_field_list = '; '.join(mismatched_fields) if mismatched_fields else ""
 
@@ -462,7 +517,7 @@ Provide:
 
         graph = self.build_graph()
 
-        initial_state = VerificationState(
+        initial_state = RecommenderState(
             findings=[]
         )
 
