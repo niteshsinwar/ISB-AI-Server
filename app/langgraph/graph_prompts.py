@@ -155,10 +155,11 @@ You are an Employment Verification Specialist with deep business intelligence.
 
 1.  **Employee Name**:
     * **CRITICAL**: You must verify that the name on the employment document (e.g., payslip, offer letter) matches the `applicantName` from the record.
-    * Handle minor variations gracefully: middle initials ("John F Doe" vs "John Doe") and minor spelling errors are considered a MATCH.
-    * Compare normalized name tokens independent of order. Split OCR-joined CamelCase words before comparing (for example, `LaxmanRao` means `Laxman Rao`).
-    * If every token in the record name appears in the document name, treat additional document name components as a MATCH. Example: record `Macharla Rao` and document `LaxmanRao Macharla` is a 100% MATCH.
-    * Confidence: 100% for minor variations, -40% for a significant mismatch.
+    * **First & Last Name Priority**: If the exact full name does not match perfectly, verify if at least the First Name and Last Name match.
+    * **Middle Name Leniency**: Middle names or middle initials being missing, added, or entirely different between the document and record MUST NOT cause a mismatch as long as First and Last names match. (e.g., "John Doe" vs "John F Doe", or "John Smith Doe" vs "John Doe" = MATCH).
+    * Compare normalized name tokens independent of order (e.g., "Doe John" = "John Doe"). Split OCR-joined CamelCase words before comparing (for example, `LaxmanRao` means `Laxman Rao`).
+    * If every essential token (First/Last name) in the record appears in the document name, treat additional document name components as a MATCH. Example: record `Macharla Rao` and document `LaxmanRao Macharla` is a 100% MATCH.
+    * Confidence: 100% for minor variations (including middle name differences), -40% for a significant mismatch (e.g., completely different person).
 
 2.  **Company Name**:
     * Match with >80% similarity. **Crucially, research subsidiaries, acquisitions, and parent companies** (e.g., "PwC" vs. "PricewaterhouseCoopers", "Google" vs. "Alphabet").
@@ -331,9 +332,10 @@ You are an Education Verification Expert with advanced academic reasoning.
 
 1.  **Student Name**:
     * **CRITICAL**: You must verify that the name on the document matches the student's name from the record (`SF Full Name`).
-    * Use fuzzy matching (>80% similarity = MATCH).
-    * Handle minor variations gracefully: middle initials ("John F Doe" vs "John Doe"), cultural name order ("Smith John" vs "John Smith"), and minor spelling errors are considered a MATCH.
-    * Confidence: 100% for minor variations, 90% for partial matches (e.g., first and last name match but middle initial is different), -40% for a significant mismatch.
+    * **First & Last Name Priority**: If the exact full name does not match perfectly, verify if at least the First Name and Last Name match.
+    * **Middle Name Leniency**: Middle names or middle initials being missing, added, or entirely different between the document and record MUST NOT cause a mismatch as long as First and Last names match. (e.g., "John Doe" vs "John F Doe", or "John Smith Doe" vs "John Doe" = MATCH).
+    * Compare normalized name tokens independent of order (e.g., "Smith John" = "John Smith").
+    * Confidence: 100% for minor variations (including middle name differences), -40% for a significant mismatch (e.g., completely different person).
 
 2.  **Institution Name (MANDATORY Verification - READ CAREFULLY)**:
     * **STEP 1 - Identify Applicant's Claim**: Analyze the applicant's institution entry. Does it contain "College", "Institute", "Polytechnic", or similar? → Applicant claimed COLLEGE. Contains only "University" without college keywords? → Applicant claimed UNIVERSITY.
@@ -531,10 +533,13 @@ Exception for applicantName: If the API source does not provide a name field at 
 **Detailed Verification Rules:**
 
 **1. Applicant Name (Mandatory-with-API-absent exception)**:
-   * If API includes a name field: require API = Applicant = Document (allow minor variations).
+   * **First & Last Name Priority**: If the exact full name does not match perfectly across sources, verify if at least the First Name and Last Name match.
+   * **Middle Name Leniency**: Middle names or middle initials being missing, added, or entirely different between the sources MUST NOT cause a mismatch as long as First and Last names match.
+   * Compare normalized name tokens independent of order (e.g., "Doe John" = "John Doe").
+   * If API includes a name field: require API = Applicant = Document (allow minor variations including middle name differences).
    * If the API has **no name field by design**:
        - Compare **Applicant vs Document** only.
-       - MATCH when equal (case/whitespace-insensitive, minor variations allowed) → Confidence **95**.
+       - MATCH when equal (minor variations/middle name differences allowed) → Confidence **95**.
        - Otherwise MISMATCH → Confidence **-50**.
 
 **2. Birthdate (Special Handling)**:
