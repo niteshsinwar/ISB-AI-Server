@@ -132,28 +132,67 @@ async def process_single_recommender_detail(
             contact_id = app_record.get('hed__Applicant__c')
             logger.info(f"Applicant: {applicant_personal_detail.get('First_Name__c')} {applicant_personal_detail.get('Last_Name__c')}")
 
-            # 3b. Get parents name from ISB_Relationships__c
-            if contact_id:
-                parents_data = await asyncio.to_thread(
-                    sf_service.sf.query,
-                    f"""
-                    SELECT Name_of_the_Person__c, Type__c
-                    FROM ISB_Relationships__c
-                    WHERE Contact__c = '{contact_id}'
-                      AND Type__c IN ('Father', 'Mother', 'Parent', 'Guardian')
-                    """
+            # 3b. Dynamically Extract Parent Name from Applicant's Identity Document using AI
+            logger.info("Fetching applicant's identity document to parse parent name")
+            parent_names = []
+            
+            try:
+                # Use standard apex endpoint to get the Personal Detail doc (hed__Application__c)
+                app_details = await asyncio.to_thread(
+                    sf_service.get_record_detail_from_apex, application_id, "hed__Application__c"
                 )
-                parent_names = []
-                for rel in parents_data.get('records', []):
-                    name = rel.get('Name_of_the_Person__c', '')
-                    if name:
-                        parent_names.append(name)
-                applicant_personal_detail['Parents_Name_From_Government_ID__c'] = ', '.join(parent_names)
-                applicant_personal_detail['Parents_Name__c'] = ', '.join(parent_names)
-                if parent_names:
-                    logger.info(f"Parents found: {', '.join(parent_names)}")
+                
+                if app_details and app_details.get("documentPayload"):
+                    doc_payload = app_details["documentPayload"]
+                    base64_data = doc_payload.get("base64Data")
+                    file_extension = doc_payload.get("fileExtension")
+                    
+                    if base64_data and file_extension:
+                        logger.info(f"Extracting text from applicant document for parent name parsing")
+                        from app.services.document_extraction_service import extract_text_from_file, create_text_extractor
+                        
+                        extractor = create_text_extractor()
+                        doc_text = await extract_text_from_file(
+                            base64_data,
+                            file_extension,
+                            record_id=application_id,
+                            extractor=extractor,
+                            record_type="application",
+                            record_data={}
+                        )
+                        
+                        if doc_text and doc_text.strip():
+                            logger.info("Document text extracted successfully. Running AI zero-shot extraction for parent name.")
+                            from app.langgraph.graph_utils import get_llm
+                            
+                            # Use complex reasoning model for better zero-shot extraction
+                            llm = get_llm("gemini-2.5-flash", temperature=0.0)
+                            prompt = f"""
+You are an expert document parser. Read the following text extracted from an Indian Government ID (like Aadhaar, Passport, PAN, or Voter ID).
+Extract the Father's or Mother's name (or Husband/Guardian's name) as written on the ID.
+
+Return ONLY the full name of the parent/guardian. Do NOT include any prefixes like "S/O", "D/O", "W/O", "Father's Name:", etc.
+If no parent/guardian name can be found in the text, return exactly the word "Unknown".
+
+DOCUMENT TEXT:
+{doc_text}
+"""
+                            response = llm.invoke(prompt)
+                            extracted_name = (response.content if hasattr(response, 'content') else str(response)).strip()
+                            
+                            if extracted_name and extracted_name.lower() != "unknown" and len(extracted_name) > 2:
+                                parent_names.append(extracted_name)
+                                logger.info(f"AI Successfully extracted parent name from document: {extracted_name}")
+                            else:
+                                logger.info("AI could not find a parent name in the document text.")
                 else:
-                    logger.info("No parent relationship records found for applicant")
+                    logger.info("No identity document found attached to the applicant's record.")
+                    
+            except Exception as e:
+                logger.warning(f"Failed to dynamically extract parent name from document: {e}")
+                
+            applicant_personal_detail['Parents_Name_From_Government_ID__c'] = ', '.join(parent_names)
+            applicant_personal_detail['Parents_Name__c'] = ', '.join(parent_names)
         else:
             logger.warning(f"Application record not found: {application_id}")
             applicant_personal_detail = None
