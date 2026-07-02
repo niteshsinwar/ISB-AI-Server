@@ -405,6 +405,43 @@ class AdmissionSFMixin:
                 raise SalesforceAPIError(f"Failed to query for Contact ID: {e}")
             raise
 
+    async def get_task_assignee_for_application(self, application_id: str) -> Optional[str]:
+        """
+        Retrieves the User ID to assign tasks to for a given application.
+        First tries to find a User matching the Checklist_Assignment__c string.
+        Falls back to the Application's OwnerId if not found.
+        """
+        self._ensure_connected()
+        try:
+            soql_app = f"SELECT OwnerId, Checklist_Assignment__c FROM hed__Application__c WHERE Id = '{application_id}' LIMIT 1"
+            def do_app_query():
+                return self._call_sf_api_with_retry(lambda: self.sf.query(soql_app))
+            app_result = await asyncio.get_event_loop().run_in_executor(None, do_app_query)
+            
+            if not app_result.get('totalSize'):
+                return None
+                
+            app_rec = app_result['records'][0]
+            owner_id = app_rec.get('OwnerId')
+            checklist_assignment = app_rec.get('Checklist_Assignment__c')
+            
+            if checklist_assignment:
+                # Need exact name match in User object
+                safe_name = checklist_assignment.replace("'", "\\'")
+                soql_user = f"SELECT Id FROM User WHERE Name = '{safe_name}' AND IsActive = true LIMIT 1"
+                def do_user_query():
+                    return self._call_sf_api_with_retry(lambda: self.sf.query(soql_user))
+                user_result = await asyncio.get_event_loop().run_in_executor(None, do_user_query)
+                
+                if user_result.get('totalSize'):
+                    return user_result['records'][0]['Id']
+            
+            # Fallback to Application OwnerId
+            return owner_id
+        except Exception as e:
+            logger.warning(f"Failed to fetch task assignee for application {application_id}: {e}")
+            return None
+
     # -----------------------------------------------------------------------
     # Test Score: Python-side data assembly (replaces Apex REST)
     # -----------------------------------------------------------------------

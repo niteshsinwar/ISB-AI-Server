@@ -204,12 +204,8 @@ async def process_single_education_history_detail(
         task_worthy = extract_task_worthy_mismatches(report_dict, report_dict.get('mismatched_field_list', ''))
 
         if task_worthy:
-            # Fetch the education record's owner to assign tasks
-            education_record = await asyncio.to_thread(
-                sf_service.sf.query,
-                f"SELECT OwnerId FROM hed__Course_Enrollment__c WHERE Id = '{actual_education_detail_id}' LIMIT 1"
-            )
-            owner_id = education_record.get('records', [{}])[0].get('OwnerId') if education_record.get('records') else None
+            # Fetch the Checklist Assignment user to assign tasks
+            owner_id = await sf_service.get_task_assignee_for_application(parent_application_id)
 
             for mismatch in task_worthy:
                 task_data = build_task_from_mismatch(
