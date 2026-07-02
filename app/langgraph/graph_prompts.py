@@ -762,3 +762,111 @@ Example if no contact info is found:
   "reason": "No personal contact information was found in the document."
 }
 """
+
+# =====================================================================================
+# == RECOMMENDER VERIFICATION (DETERMINISTIC & LLM-BASED)
+# =====================================================================================
+
+RECOMMENDER_SUBMISSION_VALIDATOR_GOAL = """
+You are a Recommender Submission Validator. Your role is to verify if a recommendation has been officially submitted.
+This is a deterministic check - no interpretation needed.
+"""
+
+RECOMMENDER_SUBMISSION_VALIDATOR_TASK = """
+Check if the recommendation status is "Submitted".
+Status is handled deterministically in the processor node.
+"""
+
+RECOMMENDER_EMAIL_CLASSIFIER_GOAL = """
+You are an Email Classifier. Your role is to classify email addresses as personal or corporate.
+This is deterministic pattern matching.
+"""
+
+RECOMMENDER_EMAIL_CLASSIFIER_TASK = """
+Classify the email domain:
+- Personal: @gmail.com, @yahoo.com, @hotmail.com, @outlook.com, @aol.com, @yahoo.co.in, @rediffmail.com
+- Corporate: All other domains with company/organization names
+Classification is handled deterministically in the processor node.
+"""
+
+RECOMMENDER_NAME_MATCHER_GOAL = """
+You are a Name Matcher. Your role is to compare recommender and applicant names.
+This is deterministic string comparison.
+"""
+
+RECOMMENDER_NAME_MATCHER_TASK = """
+Compare names (case-insensitive):
+1. First name: recommender.first_name vs applicant.first_name
+2. Last name: recommender.last_name vs applicant.last_name
+3. Flag if last names match but first names differ (potential family relationship)
+Name matching is handled deterministically in the processor node.
+"""
+
+RECOMMENDER_PERSONAL_EMAIL_ANALYZER_GOAL = """
+You are a Personal Email Context Analyzer. Your role is to understand WHY a recommender chose to use a personal email address instead of a corporate one.
+
+Analyze the recommendation content for clues about the recommender's context and situation.
+"""
+
+RECOMMENDER_PERSONAL_EMAIL_ANALYZER_TASK = """
+Given that the recommender used a personal email address, analyze the recommendation content to understand:
+
+1. **Context Clues**: Does the text reveal why they used personal email?
+   - Are they retired?
+   - Do they work for an organization without email?
+   - Are they freelance/consultant?
+   - Is there a personal reason mentioned?
+
+2. **Professionalism**: Despite personal email, is the recommendation:
+   - Professionally written?
+   - Detailed and substantive?
+   - Or hastily written?
+
+3. **Deliberateness**: Did they:
+   - Deliberately choose personal email (e.g., privacy preference)?
+   - Accidentally use personal email (less professional appearance)?
+   - Explain their choice in the recommendation?
+
+4. **Credibility Impact**: How does personal email choice affect recommendation credibility?
+
+Provide:
+- Most likely reason for personal email choice
+- Confidence (low/medium/high) in deliberate vs accidental choice
+- Impact on recommendation credibility
+"""
+
+RECOMMENDER_FAMILY_DETECTOR_GOAL = """
+You are a Family Relationship Detector. Your role is to assess the probability that a recommender is actually a family member of the applicant.
+
+Context: Last names match between recommender and applicant (different first names).
+Your task: Determine if recommender could be a parent, sibling, or other relative using a formal or informal name variation.
+"""
+
+RECOMMENDER_FAMILY_DETECTOR_TASK = """
+Analyze the evidence for family relationship:
+
+1. **Name Matching with Parents**:
+   - Does recommender's full name match either parent's name?
+   - Could first name difference be cultural/formal vs informal?
+   - Example: "Raj Kumar" recommender, parents "Rajesh Kumar" & "Priya Sharma" - could Raj be short for Rajesh?
+
+2. **Recommendation Tone Analysis**:
+   - Look for family-like language patterns:
+     * Overly protective language
+     * Personal investment level unusual for professional recommender
+     * References to personal/family matters
+     * Intimate knowledge of applicant's background
+     * Parental tone (e.g., "My child shows promise...")
+
+3. **Context Clues**:
+   - Any mentions of family connections?
+   - Unusual familiarity with applicant's personal matters?
+   - Recommendation goes beyond professional assessment?
+
+4. **Assessment**:
+   - Family relationship probability: Low / Medium / High
+   - Specific evidence from above
+   - Confidence in assessment
+
+Provide clear evidence for your conclusion.
+"""
