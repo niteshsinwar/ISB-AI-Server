@@ -30,9 +30,8 @@ def should_skip_processing(
     document_last_modified: Optional[str],
 ) -> tuple[bool, str]:
     """
-    Skip if:
-    1. Confidence = 100, OR
-    2. AVS is newer than BOTH child record AND document
+    Skip ONLY if the existing AVS is newer than BOTH the child record AND document.
+    This means the current state of the data has already been verified by the AI.
     """
     # DEBUG: Log all input values
     logger.info(f"[SKIP_DEBUG] AVS={existing_avs}, record_date={record_last_modified}, doc_date={document_last_modified}")
@@ -40,28 +39,22 @@ def should_skip_processing(
     if not existing_avs:
         return False, "no_existing_avs"
 
-    confidence = existing_avs.get('Percentage_Confidence__c')
     avs_date_str = existing_avs.get('LastModifiedDate')
-
-    # Condition 1: confidence = 100
-    if confidence == '100' or confidence == 100:
-        return True, f"confidence_100%"
-
-    # Condition 2: AVS newer than both record and doc
     avs_date = parse_sf_datetime(avs_date_str)
+    
     if not avs_date:
         return False, "avs_date_missing"
 
     record_date = parse_sf_datetime(record_last_modified)
     doc_date = parse_sf_datetime(document_last_modified)
 
-    # AVS must be newer than record (if record date exists)
+    # If the record was updated AFTER the AVS was generated -> re-verify
     if record_date and record_date > avs_date:
         return False, f"record_modified_after_avs"
 
-    # AVS must be newer than doc (if doc date exists)
+    # If the document was updated AFTER the AVS was generated -> re-verify
     if doc_date and doc_date > avs_date:
         return False, f"doc_modified_after_avs"
 
-    # AVS is newer than both - skip
+    # AVS is newer than both -> data hasn't changed since last verification, skip.
     return True, f"avs_newer_than_record_and_doc"

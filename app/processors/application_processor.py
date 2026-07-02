@@ -148,6 +148,30 @@ async def process_single_application_detail(
             record_data=record_data
         )
 
+        if not document_text_string or not document_text_string.strip():
+            logger.warning(f"No text extracted from document for {readable_name} {application_id}.")
+            fallback_summary = "Uploaded document contains no readable text or is missing."
+            summary_name = "Personal Detail Analysis"
+            summary_record_id = await asyncio.to_thread(
+                sf_service.upsert_verification_summary,
+                application_id=parent_application_id,
+                report_content=None,
+                name_value=summary_name,
+                overall_feedback=fallback_summary,
+                confidence_range="0",
+                mismatched_field_list=None,
+                contact_id=contact_id
+            )
+            job_logger = get_job_logger()
+            job_logger.add_detailed_record_log(
+                record_type="Personal_Detail",
+                doc_usage=_capture_usage(),
+                crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                status="failed",
+                error=fallback_summary
+            )
+            return f"Processed {readable_name} - Missing Document (0% Confidence)."
+
         # Capture doc extraction usage
         doc_usage = _capture_usage()
         logger.info(f"Doc extraction usage for {application_id}: {doc_usage}")
