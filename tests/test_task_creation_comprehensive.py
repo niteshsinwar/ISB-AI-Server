@@ -20,6 +20,14 @@ from app.config import SALESFORCE_ORGS
 from app.services.salesforce_service import SalesforceService
 from app.core.task_builder import extract_task_worthy_mismatches
 
+# Pytest guard: this is a live-UAT integration script. Under pytest, run it
+# only when explicitly requested (RUN_UAT_TESTS=1) — conftest injects fake
+# credentials which would otherwise fail authentication at import/collection time.
+import sys as _sys, os as _os
+if "pytest" in _sys.modules and not _os.getenv("RUN_UAT_TESTS"):
+    import pytest as _pytest
+    _pytest.skip("Live UAT integration script; set RUN_UAT_TESTS=1 to run under pytest", allow_module_level=True)
+
 org = SALESFORCE_ORGS['uat']
 sf = SalesforceService(org['client_id'], org['client_secret'], org['token_url'], 'uat')
 

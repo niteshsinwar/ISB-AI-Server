@@ -1,11 +1,10 @@
 # project_root/app/processors/resume_processor.py
 import logging
-import os
 import asyncio
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict
 
 from app.config import DCI_OBJECT_API_NAME, READABLE_OBJECT_NAMES
-from app.core.processing_utils import should_skip_processing
+from app.core.processing_utils import should_skip_processing, detect_extraction_failure
 from app.core.job_run_logger import get_job_logger
 from app.langgraph.llm_utils import reset_global_usage, get_job_cost_summary
 from app.services.document_extraction_service import DocumentExtractionError
@@ -104,6 +103,30 @@ async def process_single_resume_detail(
             record_type="resume",
             record_data={}  # Resume doesn't have field data to match
         )
+
+        # An unreadable/empty resume must not sail through the PII screen as
+        # "Accepted" — no text means nothing was actually screened.
+        extraction_failure = detect_extraction_failure(document_text_string)
+        if extraction_failure:
+            logger.warning(f"Extraction failure for {readable_name} {resume_dci_id}: {extraction_failure}")
+            summary_record_id = await asyncio.to_thread(
+                sf_service.upsert_verification_summary,
+                application_id=parent_application_id,
+                report_content="",
+                name_value="Resume Detail Analysis",
+                overall_feedback=extraction_failure,
+                confidence_range="0",
+                mismatched_field_list=None,
+            )
+            job_logger = get_job_logger()
+            job_logger.add_detailed_record_log(
+                record_type="Resume_Detail",
+                doc_usage=_capture_usage(),
+                crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                status="failed",
+                error=extraction_failure,
+            )
+            return f"Processed {readable_name} - unreadable document (0% confidence)."
 
         # Capture doc extraction usage
         doc_usage = _capture_usage()

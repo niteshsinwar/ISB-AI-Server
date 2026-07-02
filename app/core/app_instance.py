@@ -1,6 +1,6 @@
 # project_root/app/core/app_instance.py
 import logging
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 from fastapi import FastAPI
 
 logger = logging.getLogger(__name__)

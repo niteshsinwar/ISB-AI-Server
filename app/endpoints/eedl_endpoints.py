@@ -1,12 +1,11 @@
 import logging
 import asyncio
-import json
-from datetime import datetime, timezone
 from typing import Dict, Any, List, Tuple
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
 
 from app.services.salesforce_service import SalesforceService
+from app.core.processing_utils import is_valid_salesforce_id
 from app.config import (
     EEDL_RECORD_PROCESSING_CONFIG,
     EEDL_READABLE_OBJECT_NAMES,
@@ -150,18 +149,18 @@ def create_eedl_router(sf_service_dependency: Depends) -> APIRouter:
         client_fp = generate_client_fingerprint(dict(req.headers), req.client.host)
         opp_id = body.record_id.strip()
 
-        if not (isinstance(opp_id, str) and len(opp_id) in [15, 18]):
+        if not is_valid_salesforce_id(opp_id):
             raise HTTPException(status_code=400, detail="Invalid Salesforce record_id format.")
 
-        if await job_manager.is_job_active(opp_id):
+        # Atomic admission: duplicate protection + queue capacity decided under
+        # one lock (separate check-then-act calls raced under concurrent bursts).
+        admission = await job_manager.try_admit(opp_id, MAX_CONCURRENT_PROCESSING_SLOTS)
+        if admission == "duplicate":
             raise HTTPException(status_code=409, detail=f"A job for Opportunity {opp_id} is already active.")
-
-        all_jobs = await job_manager.get_all_active_jobs()
-        queued_count = sum(1 for j in all_jobs.values() if j.status == "queued")
-        if queued_count >= MAX_CONCURRENT_PROCESSING_SLOTS:
+        if admission == "queue_full":
             raise HTTPException(
                 status_code=429,
-                detail=f"Queue full: {queued_count}/{MAX_CONCURRENT_PROCESSING_SLOTS} jobs waiting.",
+                detail=f"Queue full: {MAX_CONCURRENT_PROCESSING_SLOTS} jobs already waiting.",
             )
 
         try:
@@ -188,7 +187,21 @@ def create_eedl_router(sf_service_dependency: Depends) -> APIRouter:
                 ),
             )
         except RuntimeError as e:
+            await job_manager.cancel_admission(opp_id)
             raise HTTPException(status_code=500, detail=str(e))
+        except Exception as e:
+            await job_manager.cancel_admission(opp_id)
+            # A well-formed but invalid/nonexistent ID fails the initial
+            # AI_Server_Job__c upsert with MALFORMED_ID / invalid cross
+            # reference — report it as a client error, not a 500.
+            msg = str(e)
+            if any(marker in msg for marker in ("MALFORMED_ID", "id value of incorrect type", "INVALID_CROSS_REFERENCE_KEY")):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"record_id {opp_id} is not a valid Opportunity record in this org.",
+                )
+            logger.error(f"Failed to queue EEDL job for {opp_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to queue job: {msg[:300]}")
 
     @router.get("/status/{opportunity_id}", response_model=JobStatusResponse, name="get_eedl_processing_status_endpoint")
     async def get_eedl_processing_status_endpoint(
@@ -196,7 +209,7 @@ def create_eedl_router(sf_service_dependency: Depends) -> APIRouter:
         sf_service: SalesforceService = Depends(sf_service_dependency),
         job_manager: JobManager = Depends(get_job_manager_dependency),
     ):
-        if not (isinstance(opportunity_id, str) and len(opportunity_id) in [15, 18]):
+        if not is_valid_salesforce_id(opportunity_id):
             raise HTTPException(status_code=400, detail="Invalid opportunity_id format.")
         status_info = await job_manager.get_job_status(opportunity_id, sf_service=sf_service)
         if not status_info:

@@ -33,6 +33,35 @@ class JobManager:
     def __init__(self):
         self._active_jobs: Dict[str, Job] = {}
         self._lock = asyncio.Lock()
+        # Reservations made at admission time, before the (slow) Salesforce
+        # job-record creation completes. Closes the check-then-act race where
+        # simultaneous requests all pass duplicate/capacity checks together.
+        self._admissions: set = set()
+
+    async def try_admit(self, application_id: str, max_queued: int) -> str:
+        """Atomically decide whether a new job for this application may enter.
+
+        Returns "admitted", "duplicate", or "queue_full". On "admitted" a
+        reservation is held; it is consumed by create_job() or must be
+        released via cancel_admission() if the request fails afterwards.
+        """
+        async with self._lock:
+            existing = self._active_jobs.get(application_id)
+            if (existing and not existing.is_stale) or application_id in self._admissions:
+                return "duplicate"
+            queued = sum(
+                1 for j in self._active_jobs.values()
+                if j.status == "queued" and not j.is_stale
+            ) + len(self._admissions)
+            if queued >= max_queued:
+                return "queue_full"
+            self._admissions.add(application_id)
+            return "admitted"
+
+    async def cancel_admission(self, application_id: str):
+        """Release a reservation when job creation fails after admission."""
+        async with self._lock:
+            self._admissions.discard(application_id)
 
     async def create_job(self, application_id: str, client_fingerprint: str, sf_service: SalesforceService, opportunity_id: Optional[str] = None) -> Job:
         """
@@ -92,6 +121,7 @@ class JobManager:
             
             new_job.salesforce_job_record_id = sf_job_id
             self._active_jobs[application_id] = new_job
+            self._admissions.discard(application_id)  # reservation consumed
 
         if stale_job_id:
             process_manager = await get_process_manager()

@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 class WorkerProcessError(Exception):
     """Raised when worker process fails to execute properly."""
-    pass
 
 
 class ProcessManager:

@@ -7,7 +7,7 @@ from app.config import (
     EEDL_VS_RECORD_TYPE_EDUCATION,
     MAX_SALESFORCE_REPORT_LENGTH,
 )
-from app.core.processing_utils import should_skip_processing
+from app.core.processing_utils import should_skip_processing, detect_extraction_failure
 from app.core.job_run_logger import get_job_logger
 from app.langgraph.llm_utils import reset_global_usage, get_job_cost_summary
 from app.services.document_extraction_service import DocumentExtractionError
@@ -123,8 +123,9 @@ async def process_eedl_education_record(
             record_type="education",
             record_data=record_data,
         )
-        if not document_text or not document_text.strip():
-            raise DocumentExtractionError("No text could be extracted from the education document.")
+        extraction_failure = detect_extraction_failure(document_text)
+        if extraction_failure:
+            raise DocumentExtractionError(extraction_failure)
         doc_usage = _capture_usage()
         logger.info(f"Doc extraction usage for {education_id}: {doc_usage}")
 

@@ -2,16 +2,14 @@
 
 import logging
 import asyncio
-import json
-from datetime import datetime, timezone
 from typing import Dict, Any, List, Tuple
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
 
 from app.services.salesforce_service import SalesforceService
+from app.core.processing_utils import is_valid_salesforce_id
 from app.config import (
     RELATED_RECORD_PROCESSING_CONFIG,
-    APPLICATION_OBJECT_API_NAME,
     MAX_CONCURRENT_PROCESSING_SLOTS,
     READABLE_OBJECT_NAMES
 )
@@ -22,7 +20,6 @@ from app.schemas.responses import (
     AnalyzeApplicationBodyRequest, AnalyzeApplicationResponse, JobStatusResponse,
     QueueOverviewResponse, RelatedRecordMetadata, EstimatedCompletion
 )
-from app.processors.application_processor import process_single_application_detail
 logger = logging.getLogger(__name__)
 
 def create_application_router(sf_service_dependency: Depends) -> APIRouter:
@@ -195,22 +192,21 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
         client_fp = generate_client_fingerprint(dict(req.headers), req.client.host)
         app_id = body.record_id.strip()
 
-        if not (isinstance(app_id, str) and len(app_id) in [15, 18]):
+        if not is_valid_salesforce_id(app_id):
             raise HTTPException(status_code=400, detail="Invalid Salesforce record_id format.")
 
-        # Check 1: Duplicate job protection - O(1), prevents same app being processed twice
-        if await job_manager.is_job_active(app_id):
+        # Atomic admission: duplicate protection + queue capacity decided under
+        # one lock, with a reservation held until create_job registers the job.
+        # (Separate check-then-act calls raced under concurrent bursts.)
+        admission = await job_manager.try_admit(app_id, MAX_CONCURRENT_PROCESSING_SLOTS)
+        if admission == "duplicate":
             raise HTTPException(status_code=409, detail=f"A job for Application ID {app_id} is already active.")
-
-        # Check 2: Queue capacity - O(n), prevents unbounded queue growth (allows batch processing)
-        all_jobs = await job_manager.get_all_active_jobs()
-        queued_count = sum(1 for j in all_jobs.values() if j.status == "queued")
-        if queued_count >= MAX_CONCURRENT_PROCESSING_SLOTS:
+        if admission == "queue_full":
             raise HTTPException(
                 status_code=429,
-                detail=f"Queue full: {queued_count}/{MAX_CONCURRENT_PROCESSING_SLOTS} jobs waiting. Please try again later."
+                detail=f"Queue full: {MAX_CONCURRENT_PROCESSING_SLOTS} jobs already waiting. Please try again later."
             )
-            
+
         try:
             new_job = await job_manager.create_job(app_id, client_fp, sf_service=sf_service)
             metadata, bg_data = await fetch_initial_related_records_metadata(sf_service, app_id)
@@ -231,7 +227,21 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
                 )
             )
         except RuntimeError as e:
+            await job_manager.cancel_admission(app_id)
             raise HTTPException(status_code=500, detail=str(e))
+        except Exception as e:
+            await job_manager.cancel_admission(app_id)
+            # A well-formed but invalid/nonexistent ID fails the initial
+            # AI_Server_Job__c upsert with MALFORMED_ID / invalid cross
+            # reference — report it as a client error, not a 500.
+            msg = str(e)
+            if any(marker in msg for marker in ("MALFORMED_ID", "id value of incorrect type", "INVALID_CROSS_REFERENCE_KEY")):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"record_id {app_id} is not a valid Application record in this org.",
+                )
+            logger.error(f"Failed to queue job for {app_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to queue job: {msg[:300]}")
 
     @router.get("/status/{application_id}", response_model=JobStatusResponse)
     async def get_application_processing_status_endpoint(
@@ -239,7 +249,7 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
         sf_service: SalesforceService = Depends(sf_service_dependency),
         job_manager: JobManager = Depends(get_job_manager_dependency)
     ):
-        if not (isinstance(application_id, str) and len(application_id) in [15, 18]):
+        if not is_valid_salesforce_id(application_id):
             raise HTTPException(status_code=400, detail="Invalid application_id format.")
         
         status_info = await job_manager.get_job_status(application_id, sf_service=sf_service)

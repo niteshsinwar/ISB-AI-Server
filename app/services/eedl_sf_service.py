@@ -6,7 +6,6 @@ All methods here are mixed into SalesforceService via EedlSFMixin.
 import logging
 import asyncio
 import json
-import base64
 from typing import Dict, Any, Optional, List
 
 from app.config import (
@@ -20,7 +19,6 @@ from app.config import (
     EEDL_VS_OBJECT_API_NAME, EEDL_VS_OPPORTUNITY_LOOKUP_FIELD, EEDL_VS_EDUCATION_LOOKUP_FIELD,
     EEDL_VS_RECORD_TYPE_FIELD, EEDL_VS_VERIFICATION_STATUS_FIELD, EEDL_VS_CONFIDENCE_FIELD,
     EEDL_VS_REPORT_FIELD, EEDL_VS_OVERALL_FEEDBACK_FIELD, EEDL_VS_MISMATCHED_FIELDS_FIELD,
-    EEDL_VS_NAME_FIELD, EEDL_VS_RECORD_TYPE_ID_DOCUMENT, EEDL_VS_RECORD_TYPE_EDUCATION,
     EEDL_FILE_MATCHING_CONFIG,
 )
 

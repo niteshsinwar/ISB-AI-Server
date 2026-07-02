@@ -3,17 +3,15 @@
 
 import base64
 import io
-import os
 import asyncio
 import logging
-from typing import Optional, List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 import time
-import json
 
 import fitz  # PyMuPDF
-from PIL import Image, ImageOps
+from PIL import Image
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 
@@ -204,7 +202,6 @@ logger = logging.getLogger(__name__)
 # --- Custom Exception ---
 class DocumentExtractionError(Exception):
     """Custom exception for errors during the document extraction process."""
-    pass
 
 # --- Optimized Gemini Processor ---
 class OptimizedGeminiProcessor:

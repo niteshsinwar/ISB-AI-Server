@@ -21,7 +21,6 @@ from app.config import (
     AVS_TASK_DCI_LOOKUP_FIELD,
     AI_SERVER_JOB_OBJECT_API_NAME, AIJ_APPLICATION_LOOKUP_FIELD, AIJ_JOB_ID_FIELD,
     AIJ_STATUS_FIELD, AIJ_MESSAGE_FIELD, AIJ_PROGRESS_FIELD, AIJ_CLIENT_FP_FIELD, AIJ_LOGS_FIELD,
-    DCI_OBJECT_API_NAME, DCI_STATUS_FIELD,
     APPLICATION_OBJECT_API_NAME, APPLICATION_CONTACT_LOOKUP_FIELD_ON_APP,
 )
 
@@ -405,39 +404,46 @@ class AdmissionSFMixin:
                 raise SalesforceAPIError(f"Failed to query for Contact ID: {e}")
             raise
 
-    async def get_task_assignee_for_application(self, application_id: str) -> Optional[str]:
+    async def get_task_assignee_for_application(
+        self,
+        application_id: str,
+        dci_id: Optional[str] = None,
+    ) -> Optional[str]:
         """
-        Retrieves the User ID to assign tasks to for a given application.
-        First tries to find a User matching the Checklist_Assignment__c string.
-        Falls back to the Application's OwnerId if not found.
+        Retrieves the User ID to assign mismatch-review tasks to.
+
+        Business rule: the task goes to whoever OWNS the DocumentChecklistItem
+        (the checklist record the applicant's document hangs off). Falls back
+        to the Application's OwnerId only when no checklist owner can be
+        resolved, so a task always reaches a responsible human.
         """
+        from app.core.processing_utils import is_valid_salesforce_id
         self._ensure_connected()
+
+        # Primary: DocumentChecklistItem owner
+        if dci_id and is_valid_salesforce_id(dci_id):
+            try:
+                soql_dci = f"SELECT OwnerId FROM DocumentChecklistItem WHERE Id = '{dci_id}' LIMIT 1"
+                def do_dci_query():
+                    return self._call_sf_api_with_retry(lambda: self.sf.query(soql_dci))
+                dci_result = await asyncio.get_event_loop().run_in_executor(None, do_dci_query)
+                if dci_result.get('totalSize'):
+                    owner_id = dci_result['records'][0].get('OwnerId')
+                    if owner_id:
+                        return owner_id
+                logger.warning(f"DocumentChecklistItem {dci_id} has no resolvable owner; falling back to Application owner.")
+            except Exception as e:
+                logger.warning(f"Failed to fetch DCI owner for {dci_id}: {e}; falling back to Application owner.")
+
+        # Fallback: Application owner
         try:
-            soql_app = f"SELECT OwnerId, Checklist_Assignment__c FROM hed__Application__c WHERE Id = '{application_id}' LIMIT 1"
+            soql_app = f"SELECT OwnerId FROM {APPLICATION_OBJECT_API_NAME} WHERE Id = '{application_id}' LIMIT 1"
             def do_app_query():
                 return self._call_sf_api_with_retry(lambda: self.sf.query(soql_app))
             app_result = await asyncio.get_event_loop().run_in_executor(None, do_app_query)
-            
-            if not app_result.get('totalSize'):
-                return None
-                
-            app_rec = app_result['records'][0]
-            owner_id = app_rec.get('OwnerId')
-            checklist_assignment = app_rec.get('Checklist_Assignment__c')
-            
-            if checklist_assignment:
-                # Need exact name match in User object
-                safe_name = checklist_assignment.replace("'", "\\'")
-                soql_user = f"SELECT Id FROM User WHERE Name = '{safe_name}' AND IsActive = true LIMIT 1"
-                def do_user_query():
-                    return self._call_sf_api_with_retry(lambda: self.sf.query(soql_user))
-                user_result = await asyncio.get_event_loop().run_in_executor(None, do_user_query)
-                
-                if user_result.get('totalSize'):
-                    return user_result['records'][0]['Id']
-            
-            # Fallback to Application OwnerId
-            return owner_id
+            if app_result.get('totalSize'):
+                return app_result['records'][0].get('OwnerId')
+            return None
         except Exception as e:
             logger.warning(f"Failed to fetch task assignee for application {application_id}: {e}")
             return None
@@ -502,7 +508,7 @@ class AdmissionSFMixin:
             try:
                 soql_app = (
                     f"SELECT hed__Applicant__r.Name, hed__Applicant__r.Birthdate "
-                    f"FROM hed__Application__c WHERE Id = '{application_id}' LIMIT 1"
+                    f"FROM {APPLICATION_OBJECT_API_NAME} WHERE Id = '{application_id}' LIMIT 1"
                 )
                 app_result = self._call_sf_api_with_retry(lambda: self.sf.query(soql_app))
                 if app_result.get('totalSize'):

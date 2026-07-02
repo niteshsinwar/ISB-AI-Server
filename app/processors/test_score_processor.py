@@ -1,6 +1,5 @@
 # project_root/app/processors/test_score_processor.py
 import logging
-import os
 import asyncio
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -9,7 +8,7 @@ from app.config import (
     MAX_SALESFORCE_REPORT_LENGTH,
     READABLE_OBJECT_NAMES
 )
-from app.core.processing_utils import should_skip_processing
+from app.core.processing_utils import should_skip_processing, detect_extraction_failure
 from app.core.job_run_logger import get_job_logger
 from app.langgraph.llm_utils import reset_global_usage, get_job_cost_summary
 from app.services.document_extraction_service import DocumentExtractionError
@@ -169,10 +168,12 @@ async def process_single_test_score_detail(
             record_data=record_data
         )
 
-        if not document_text_string or not document_text_string.strip():
-            logger.warning(f"No text extracted from document for {readable_name} {test_score_id}.")
-            fallback_summary = "Uploaded document contains no readable text or is missing."
-            summary_name = "Test Score Verification Summary"
+        extraction_failure = detect_extraction_failure(document_text_string)
+        if extraction_failure:
+            logger.warning(f"Extraction failure for {readable_name} {test_score_id}: {extraction_failure}")
+            fallback_summary = extraction_failure
+            name_suffix = record_data.get('RecordTypeName__c') or item_index or test_score_id
+            summary_name = f"Test Score Analysis ({name_suffix})"
             summary_record_id = await asyncio.to_thread(
                 sf_service.upsert_verification_summary,
                 application_id=parent_application_id,
@@ -181,8 +182,7 @@ async def process_single_test_score_detail(
                 overall_feedback=fallback_summary,
                 confidence_range="0",
                 mismatched_field_list=None,
-                contact_id=actual_test_score_id,
-                related_field_name="Test_Score__c"
+                test_id=test_score_id
             )
             job_logger = get_job_logger()
             job_logger.add_detailed_record_log(

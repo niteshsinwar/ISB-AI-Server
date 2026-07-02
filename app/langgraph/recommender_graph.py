@@ -1,18 +1,14 @@
 """LangGraph orchestrator for recommender detail verification."""
 import logging
+import re
 from typing import Any, Dict, Optional
 
 from langgraph.graph import StateGraph, START, END
 
+from app.config import MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION
 from app.langgraph.state import RecommenderState
 from app.langgraph.graph_utils import get_llm
 from app.langgraph.graph_prompts import (
-    RECOMMENDER_SUBMISSION_VALIDATOR_GOAL,
-    RECOMMENDER_SUBMISSION_VALIDATOR_TASK,
-    RECOMMENDER_EMAIL_CLASSIFIER_GOAL,
-    RECOMMENDER_EMAIL_CLASSIFIER_TASK,
-    RECOMMENDER_NAME_MATCHER_GOAL,
-    RECOMMENDER_NAME_MATCHER_TASK,
     RECOMMENDER_PERSONAL_EMAIL_ANALYZER_GOAL,
     RECOMMENDER_PERSONAL_EMAIL_ANALYZER_TASK,
     RECOMMENDER_FAMILY_DETECTOR_GOAL,
@@ -20,6 +16,32 @@ from app.langgraph.graph_prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_phone(value: Optional[str]) -> str:
+    """Reduce a phone number to comparable digits (ignores +91, spaces, dashes)."""
+    digits = re.sub(r"\D", "", value or "")
+    # Compare on the last 10 digits so "+91 98765 43210" == "9876543210"
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+def _extract_probability(analysis: str) -> str:
+    """Extract Low/Medium/High from LLM analysis, anchored to 'probability' context.
+
+    Avoids false positives like the word 'high' inside 'highly unlikely'.
+    """
+    text = (analysis or "").lower()
+    # Drop template echoes like "(Low/Medium/High)" so they can't be matched
+    text = re.sub(r"\(\s*low\s*/\s*medium\s*/\s*high\s*\)", "", text)
+    # Prefer explicit statements such as "probability: high" / "probability is low"
+    anchored = re.search(r"probability[^.\n]{0,40}?\b(low|medium|high)\b", text)
+    if anchored:
+        return anchored.group(1).capitalize()
+    # Fallback: a standalone rating word right before 'probability'
+    reversed_anchor = re.search(r"\b(low|medium|high)\b[^.\n]{0,40}?probability", text)
+    if reversed_anchor:
+        return reversed_anchor.group(1).capitalize()
+    return "Unknown"
 
 
 class RecommenderGraphOrchestrator:
@@ -42,7 +64,7 @@ class RecommenderGraphOrchestrator:
         self.recommender_record = recommender_record
         self.responses = responses
         self.applicant_personal_detail = applicant_personal_detail
-        self.llm = get_llm("gemini-2.0-flash", 0.7)
+        self.llm = get_llm(MODEL_STANDARD_VERIFICATION, TEMP_STANDARD_VERIFICATION)
 
     def build_graph(self):
         """Build the verification graph."""
@@ -123,7 +145,7 @@ class RecommenderGraphOrchestrator:
         """
         logger.info("Running email classifier node")
 
-        email = self.recommender_record.get("Email__c", "").lower()
+        email = (self.recommender_record.get("Email__c") or "").lower()
         email_type = "unknown"
 
         personal_domains = {
@@ -169,7 +191,7 @@ class RecommenderGraphOrchestrator:
         recommender_first = (self.recommender_record.get("First_Name__c") or "").strip().lower()
         recommender_last = (self.recommender_record.get("Last_Name__c") or "").strip().lower()
         recommender_email = (self.recommender_record.get("Email__c") or "").strip().lower()
-        recommender_mobile = (self.recommender_record.get("Mobile__c") or "").strip()
+        recommender_mobile = _normalize_phone(self.recommender_record.get("MobilePhone__c"))
 
         # Extract applicant name from personal detail record
         applicant_first = ""
@@ -181,7 +203,7 @@ class RecommenderGraphOrchestrator:
             applicant_first = (self.applicant_personal_detail.get("First_Name__c") or "").strip().lower()
             applicant_last = (self.applicant_personal_detail.get("Last_Name__c") or "").strip().lower()
             applicant_email = (self.applicant_personal_detail.get("Email") or "").strip().lower()
-            applicant_mobile = (self.applicant_personal_detail.get("MobilePhone") or "").strip()
+            applicant_mobile = _normalize_phone(self.applicant_personal_detail.get("MobilePhone"))
 
         first_name_match = recommender_first == applicant_first and recommender_first != ""
         last_name_match = recommender_last == applicant_last and recommender_last != ""
@@ -377,14 +399,8 @@ Provide:
         response = self.llm.invoke(prompt)
         analysis = response.content if hasattr(response, 'content') else str(response)
 
-        # Extract probability level from analysis
-        probability = "Unknown"
-        if "high" in analysis.lower():
-            probability = "High"
-        elif "medium" in analysis.lower():
-            probability = "Medium"
-        elif "low" in analysis.lower():
-            probability = "Low"
+        # Extract probability level from analysis (anchored to 'probability' context)
+        probability = _extract_probability(analysis)
 
         state["family_relationship_probability"] = probability
         state["family_relationship_analysis"] = analysis

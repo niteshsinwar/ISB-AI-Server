@@ -42,7 +42,7 @@ AIJ_STATUS_FIELD: str = os.getenv("AIJ_STATUS_FIELD", "Status__c")
 AIJ_MESSAGE_FIELD: str = os.getenv("AIJ_MESSAGE_FIELD", "Message__c")
 AIJ_PROGRESS_FIELD: str = os.getenv("AIJ_PROGRESS_FIELD", "Progress_Details__c")
 AIJ_CLIENT_FP_FIELD: str = os.getenv("AIJ_CLIENT_FP_FIELD", "Client_Fingerprint__c")
-AIJ_LOGS_FIELD: str = os.getenv("AIJ_LOGS_FIELD", "logs__c")
+AIJ_LOGS_FIELD: str = os.getenv("AIJ_LOGS_FIELD", "Logs__c")  # exact org casing (verified UAT 2026-07-02)
 
 APPLICATION_VERIFICATION_SUMMARY_OBJECT_API_NAME: str = "Application_Verification_Summary__c"
 AVS_APPLICATION_LOOKUP_FIELD: str = "Application__c"
@@ -213,14 +213,11 @@ APEX_ENDPOINT_PATHS: Dict[str, str] = {
 # --- Google Gemini Configuration ---
 DOC_GOOGLE_API_KEY: Optional[str] = os.getenv("DOC_GOOGLE_API_KEY")
 CREW_GOOGLE_API_KEY: Optional[str] = os.getenv("CREW_GOOGLE_API_KEY")
-MODEL_DATA_ANALYSIS: str = "gemini-2.5-flash"
 MODEL_COMPLEX_REASONING: str = "gemini-2.5-flash"
 TEMP_COMPLEX_REASONING: float = float(os.getenv("TEMP_COMPLEX_REASONING", "0.0"))
 MODEL_TEXT_EXTRACTION: str = "gemini-2.5-flash"
 MODEL_STANDARD_VERIFICATION: str = "gemini-2.5-flash"
-MODEL_HTML_SYNTHESIS: str = "gemini-2.5-flash"
 TEMP_STANDARD_VERIFICATION: float = float(os.getenv("TEMP_STANDARD_VERIFICATION", "0.0"))
-TEMP_HTML_SYNTHESIS: float = float(os.getenv("TEMP_HTML_SYNTHESIS", "0.0"))
 
 # --- Gemini API Pricing Configuration (per 1M tokens) ---
 # Source: https://ai.google.dev/gemini-api/docs/pricing
@@ -294,7 +291,7 @@ RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
         "order_by": "Affiliation__r.hed__StartDate__c DESC NULLS LAST",
         "limit": 1,
         "filtering_criteria": {
-            "field_api_name": "Type_of_Employment__c",
+            "field_api_name": "Type_Of_Employment__c",  # exact org casing (verified UAT 2026-07-02)
             "allowed_values": [
                 'Full-Time'
             ]

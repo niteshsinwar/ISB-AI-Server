@@ -42,11 +42,13 @@ class TestProcessingUtils:
         assert reason == "no_existing_avs"
 
     def test_should_skip_confidence_100_int(self):
+        # Post-fix semantics: skip is based purely on AVS being newer than both
+        # the record and the document — confidence no longer short-circuits.
         from app.core.processing_utils import should_skip_processing
         avs = {"Percentage_Confidence__c": 100, "LastModifiedDate": "2025-01-01T00:00:00.000+0000"}
         skip, reason = should_skip_processing(avs, None, None)
         assert skip is True
-        assert "100" in reason
+        assert reason == "avs_newer_than_record_and_doc"
 
     def test_should_skip_confidence_100_str(self):
         from app.core.processing_utils import should_skip_processing

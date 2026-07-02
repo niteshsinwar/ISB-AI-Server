@@ -51,10 +51,12 @@ def test_employment_bank_statement_reporter_forces_failed_document_type_mismatch
 
     report = result["final_report"]
     assert report["verification_status"] == "Failed"
-    assert report["confidence_range"] == 20
-    assert report["overall_percentage_confidence"] == 20
-    assert report["mismatched_field_list"] == "Document_Type"
-    assert report["verification_analysis_report"][0]["document_value"] == "BANK_STATEMENT"
+    # Per "AI verification fixes" requirement: bank statement instead of payslip
+    # is rejected outright with 0% confidence, no further parameter checks.
+    assert report["confidence_range"] == 0
+    assert report["overall_percentage_confidence"] == 0
+    assert report["mismatched_field_list"] == "Payslip"
+    assert report["verification_analysis_report"][0]["document_value"] == "Bank Statement"
     assert "Is Critical" not in report["field_comparison_summary"]
     nodes.llm_comparator.invoke.assert_not_called()
 

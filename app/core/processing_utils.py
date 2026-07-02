@@ -8,6 +8,39 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# Sentinel prefixes emitted by document_extraction_service when a document could
+# not actually be read. These strings must never be fed to a comparator LLM as
+# if they were document content — they represent extraction failures.
+_EXTRACTION_FAILURE_MARKERS = (
+    "## Document Processing Error",
+    "No content could be extracted from this PDF.",
+)
+
+
+def is_valid_salesforce_id(value: Any) -> bool:
+    """Strict Salesforce ID shape check: 15 or 18 alphanumeric characters.
+
+    Length alone is not enough — quoted/injected strings of the right length
+    must never reach SOQL interpolation or sObject payloads.
+    """
+    import re
+    return isinstance(value, str) and bool(re.fullmatch(r"[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?", value))
+
+
+def detect_extraction_failure(document_text: Optional[str]) -> Optional[str]:
+    """Return a human-readable failure reason when the extracted "text" is
+    actually an extraction-failure sentinel, else None."""
+    text = (document_text or "").strip()
+    if not text:
+        return "Uploaded document contains no readable text or is missing."
+    for marker in _EXTRACTION_FAILURE_MARKERS:
+        if text.startswith(marker):
+            return (
+                "Document could not be processed (corrupted, unsupported, or "
+                "unreadable file). Extraction detail: " + text[:400]
+            )
+    return None
+
 
 def parse_sf_datetime(dt_string: Optional[str]) -> Optional[datetime]:
     """Parse Salesforce datetime string to Python datetime."""

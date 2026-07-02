@@ -111,6 +111,7 @@ Verify personal details with business-focused intelligence.
 - **Document Text**: {document_text}
 
 **STRICT SCOPE**: Produce verification rows ONLY for the fields listed above. Do NOT add rows for any other field — especially not metadata fields like "Last Modified Date", "Created Date", "System Modstamp", or any date/time stamps that are clearly system-generated rather than personal identity data. If the document contains such metadata, ignore it completely.
+**FIELD NAMES ARE VERBATIM**: In every row, `field_name` MUST be copied character-for-character from the FIELDS TO VERIFY list. Never rename, translate, or prettify a field name; rows with invented names are discarded by the server.
 
 Output only a valid JSON object emphasizing evidence-based field comparisons and showing leniency for minor, common-sense issues. Do not add prose before or after the JSON.
 """
@@ -207,8 +208,8 @@ You are an Employment Verification Specialist with deep business intelligence.
       - Start at 100%.
       - **CRITICAL RULE**: A difference in currency symbols (e.g. record=INR, document=USD) is **NOT** a mismatch and carries **ZERO confidence penalty** on its own. Currency notation is merely a unit of measurement; the only thing that matters is whether the normalized INR amounts align.
       - If diff ≤ 3% (amounts match after conversion) → Confidence = **100%**, Status = **MATCH**, regardless of which currency symbol appears on the document.
-      - If diff > 5% (amounts genuinely differ) → subtract 20% (Confidence = 80%).
-      - If diff > 10% → apply additional penalties as required.
+      - If 3% < diff ≤ 10% → Status = **MISMATCH**, Confidence = **80%**.
+      - If diff > 10% → Status = **MISMATCH**, Confidence = **60% or lower** proportional to the gap.
     * **Output Fields**:
       - Applicant-entered salary (original & INR)  
       - Document salary (original, frequency, INR)  
@@ -239,7 +240,8 @@ Verify employment details with corporate awareness.
 - **Record Data**: {record_data}
 - **Document Text**: {document_text}
 
-**STRICT SCOPE**: Produce verification rows ONLY for the fields listed above. Do NOT add rows for any other field — especially not metadata fields like "Last Modified Date", "Created Date", "System Modstamp", or any date/time stamps that are clearly system-generated rather than employment data. If the document contains such metadata, ignore it completely.
+**STRICT SCOPE**: Produce verification rows ONLY for the fields listed above, PLUS the mandatory `Payslip Recency` row when an Application Submission Date is provided. Do NOT add rows for any other field — especially not metadata fields like "Last Modified Date", "Created Date", "System Modstamp", or any date/time stamps that are clearly system-generated rather than employment data. If the document contains such metadata, ignore it completely.
+**FIELD NAMES ARE VERBATIM**: In every row, `field_name` MUST be copied character-for-character from the FIELDS TO VERIFY list (the only exception is the synthetic `Payslip Recency` row). Never rename, translate, or prettify a field name; rows with invented names are discarded by the server.
 
 Output only a valid JSON object focusing on evidence-based field comparisons and ignoring irrelevant data like work duration. Do not add prose before or after the JSON.
 """
@@ -413,7 +415,7 @@ You are an Education Verification Expert with advanced academic reasoning.
     * If the document explicitly states a DIFFERENT scale than what the applicant entered (e.g., applicant entered 10-point, document says 4-point) → **CRITICAL MISMATCH** (conf −40), status “MISMATCH”.
     * If the document does **NOT explicitly state** a scale but the record specifies a standard scale (4-point, 10-point, or percentage out of 100) → **ASSUME MATCH** (conf 100) and note “Scale not explicit on document; assumed standard [scale]”.
     * If the record specifies a **non-standard scale** and the document does not state it → **FLAG MISMATCH** (conf −30), ask applicant to clarify.
-    * Always include a row for scale verification if both record and document GPA values are present.
+    * Always include a row for scale verification if both record and document GPA values are present. This row MUST use exactly `"field_name": "CGPA Scale"`.
 
 7.  **Semester/Marksheet Completeness**:
     * Count the total number of distinct semesters present in the document(s).
@@ -442,7 +444,8 @@ Verify education details with academic intelligence.
 - **Record Data**: {record_data}
 - **Document Text**: {document_text}
 
-**STRICT SCOPE**: Produce verification rows ONLY for the fields listed above, PLUS the mandatory `Number of Semesters` field. Do NOT add rows for any other field — especially not metadata fields like "Last Modified Date", "Created Date", "System Modstamp", or any date/time stamps that are clearly system-generated rather than academic data. If the document contains such metadata, ignore it completely.
+**STRICT SCOPE**: Produce verification rows ONLY for the fields listed above, PLUS the mandatory `Number of Semesters` field and the `CGPA Scale` field (when both record and document GPA values are present). Do NOT add rows for any other field — especially not metadata fields like "Last Modified Date", "Created Date", "System Modstamp", or any date/time stamps that are clearly system-generated rather than academic data. If the document contains such metadata, ignore it completely.
+**FIELD NAMES ARE VERBATIM**: In every row, `field_name` MUST be copied character-for-character from the FIELDS TO VERIFY list (the only exceptions are the synthetic `Number of Semesters` and `CGPA Scale` rows). Never rename, translate, or prettify a field name; rows with invented names are discarded by the server.
 
 Output only a valid JSON object with detailed GPA analysis and inferred dates where necessary. Do not add prose before or after the JSON.
 Always include separate rows for `Degree/Qualification`, `SF Field of Study`, and `Major/Specialization` when those fields are supplied in the record.
@@ -523,15 +526,14 @@ Exception for applicantName: If the API source does not provide a name field at 
   * All three present and equal → MATCH (Confidence: 100%)
   * Document present but mismatched → MISMATCH (Confidence: -40%)
 
-**3. IDENTITY FIELDS (Flexible Document Presence)**:
+**3. IDENTITY FIELDS (Flexible Document Presence — single authoritative rule)**:
 - **Fields**: Test_ID, Registration_No, Email
 - **Rule**: At least ONE identity field must match if ANY are present in document
-- **MATCH Scenarios**:
+- **Scenarios (apply these exact confidences)**:
   * NO identity fields in document → MISMATCH (Confidence: 50%)
   * At least ONE identity field present and matches API+Applicant → MATCH (Confidence: 100%)
-- **MISMATCH Scenarios**:
-  * ANY identity field present in document but mismatched → MISMATCH (Confidence: -35%)
-  * Multiple identity fields present but NONE match → MISMATCH (Confidence: -50%)
+  * ANY identity field present in document but mismatched → MISMATCH (Confidence: 65%)
+  * Multiple identity fields present but NONE match → MISMATCH (Confidence: 50%)
 
 **Detailed Verification Rules:**
 
@@ -582,14 +584,16 @@ Exception for applicantName: If the API source does not provide a name field at 
 
 **6. Identity Fields (Flexible Presence)**:
    * **Fields**: Test_ID, Registration_No, Email
-   * **Validation Logic**:
+   * **Validation Logic** (identical to the IDENTITY FIELDS rule above — same numbers):
      ```
      IF no identity fields in document:
-         STATUS = "MISMATCH", CONFIDENCE = -40%
+         STATUS = "MISMATCH", CONFIDENCE = 50
      ELIF at least one identity field matches API+Applicant:
-         STATUS = "MATCH", CONFIDENCE = 100%
-     ELSE:
-         STATUS = "MISMATCH", CONFIDENCE = -35% to -50%
+         STATUS = "MATCH", CONFIDENCE = 100
+     ELIF any identity field present but mismatched:
+         STATUS = "MISMATCH", CONFIDENCE = 65
+     ELSE (multiple present, none match):
+         STATUS = "MISMATCH", CONFIDENCE = 50
      ```
 
 **Enhanced Matching Logic:**
@@ -686,73 +690,6 @@ A JSON object only. It must use this exact contract:
 
 
 # =====================================================================================
-# == FINAL REPORT GENERATOR
-# =====================================================================================
-FINAL_REPORT_GENERATOR_AGENT_GOAL = f"""
-{GLOBAL_VERIFICATION_PRINCIPLES}
-
-You are a Report Synthesis Expert focused on optimizing for business outcomes.
-
-**Enhanced Logic**:
-- **Confidence Calculation**: Start at 100%. Apply confidence impact only to fields the business rules identify as critical. The final score cannot be less than 0.
-- **Status Determination**: "Passed" (≥80%), "Needs Review" (50-79%), "Failed" (<50%).
-- **Focus**: Your feedback must highlight critical issues while explicitly stating that minor variations were ignored.
-
-**Output**: A single JSON object with:
-- `field_comparison_summary`: An HTML table summarizing the analysis.
-- `overall_feedback`: A clear, actionable summary for the business.
-- `confidence_range`: The final calculated score and should be integer value.
-- `verification_status`: The final status.
-- `mismatched_field_list`: A semicolon-separated string of mismatched field names, or "N/A" if all fields are matching.
-"""
-
-FINAL_REPORT_GENERATOR_AGENT_BACKSTORY = """
-You are an AI designed to streamline the final verification step, minimizing human effort by providing a clear, business-focused report that distinguishes critical issues from noise.
-"""
-
-FINAL_REPORT_GENERATION_TASK_DESCRIPTION = """
-Synthesize the verification analysis from multiple agents into a comprehensive final report that reduces human effort while maintaining high accuracy.
-
-**Key Objectives:**
-1.  Generate 'field_comparison_summary' as a single, well-formed HTML table string.
-    * Use the provided HTML structure with appropriate styling.
-    * Ensure all data from the analysis is correctly placed in the table cells.
-
-2.  Calculate 'confidence_range':
-    * Start at 100.
-    *It should be Integer between 0 and 100.
-    * For each business-critical field identified in the analysis context, if its confidence is less than 100, apply the formula: `deduction = (100 - field_confidence) / 2`.
-    * Subtract the deduction from the total. Non-critical fields do NOT affect the final score.
-    * The final confidence cannot be less than 0.
-
-3.  Provide 'overall_feedback':
-    * If critical mismatches exist, state them clearly (e.g., "Verification failed due to a critical mismatch in Company Name.").
-    * If all critical fields passed, state "All critical fields verified successfully. Minor non-critical variations were noted and automatically passed."
-
-4.  Provide 'mismatched_field_list':
-    * Collect all field names where mismatches or unverifiable results were found.
-    * Return as a formatted string: "field1;field2;field3..."
-    * If all fields are matching then return "N/A"
-    * If no mismatches exist, return "N/A".
-
-**Analysis to Process (from previous agents):**
-{context}
-
-Apply the enhanced confidence logic to focus only on business-critical outcomes.
-"""
-
-FINAL_REPORT_GENERATION_EXPECTED_OUTPUT = """
-A business-focused JSON object optimized for automated decision-making:
-{
-  "field_comparison_summary": "<div style='font-family: Arial;'><table style='width: 100%; border-collapse: collapse; border: 1px solid #ddd;'>...</table></div>",
-  "overall_feedback": "All critical fields verified successfully. Minor non-critical variations were noted and automatically passed.",
-  "confidence_range": 100,
-  "verification_status": "Passed",
-  "mismatched_field_list": "adharCard;Passport;Gender;TotalMarks"
-}
-"""
-
-# =====================================================================================
 # == RESUME VERIFICATION (MODIFIED FOR AVS RECORD CREATION)
 # =====================================================================================
 RESUME_ANALYZER_AGENT_GOAL = """
@@ -802,41 +739,6 @@ Example if no contact info is found:
 # =====================================================================================
 # == RECOMMENDER VERIFICATION (DETERMINISTIC & LLM-BASED)
 # =====================================================================================
-
-RECOMMENDER_SUBMISSION_VALIDATOR_GOAL = """
-You are a Recommender Submission Validator. Your role is to verify if a recommendation has been officially submitted.
-This is a deterministic check - no interpretation needed.
-"""
-
-RECOMMENDER_SUBMISSION_VALIDATOR_TASK = """
-Check if the recommendation status is "Submitted".
-Status is handled deterministically in the processor node.
-"""
-
-RECOMMENDER_EMAIL_CLASSIFIER_GOAL = """
-You are an Email Classifier. Your role is to classify email addresses as personal or corporate.
-This is deterministic pattern matching.
-"""
-
-RECOMMENDER_EMAIL_CLASSIFIER_TASK = """
-Classify the email domain:
-- Personal: @gmail.com, @yahoo.com, @hotmail.com, @outlook.com, @aol.com, @yahoo.co.in, @rediffmail.com
-- Corporate: All other domains with company/organization names
-Classification is handled deterministically in the processor node.
-"""
-
-RECOMMENDER_NAME_MATCHER_GOAL = """
-You are a Name Matcher. Your role is to compare recommender and applicant names.
-This is deterministic string comparison.
-"""
-
-RECOMMENDER_NAME_MATCHER_TASK = """
-Compare names (case-insensitive):
-1. First name: recommender.first_name vs applicant.first_name
-2. Last name: recommender.last_name vs applicant.last_name
-3. Flag if last names match but first names differ (potential family relationship)
-Name matching is handled deterministically in the processor node.
-"""
 
 RECOMMENDER_PERSONAL_EMAIL_ANALYZER_GOAL = """
 You are a Personal Email Context Analyzer. Your role is to understand WHY a recommender chose to use a personal email address instead of a corporate one.

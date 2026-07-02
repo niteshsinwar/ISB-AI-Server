@@ -51,9 +51,8 @@ class TestConfig:
         assert "Education__c" in target_types
 
     def test_model_names_are_strings(self):
-        from app.config import MODEL_STANDARD_VERIFICATION, MODEL_HTML_SYNTHESIS, MODEL_TEXT_EXTRACTION
+        from app.config import MODEL_STANDARD_VERIFICATION, MODEL_TEXT_EXTRACTION
         assert isinstance(MODEL_STANDARD_VERIFICATION, str)
-        assert isinstance(MODEL_HTML_SYNTHESIS, str)
         assert isinstance(MODEL_TEXT_EXTRACTION, str)
 
     def test_numeric_config_values(self):

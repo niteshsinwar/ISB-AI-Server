@@ -1,15 +1,15 @@
 # project_root/app/processors/employment_processor.py
 import logging
-import os
 import asyncio
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from app.config import (
+    APPLICATION_OBJECT_API_NAME,
     EMPLOYMENT_LOG_OBJECT_API_NAME,
     MAX_SALESFORCE_REPORT_LENGTH,
     READABLE_OBJECT_NAMES
 )
-from app.core.processing_utils import should_skip_processing
+from app.core.processing_utils import should_skip_processing, detect_extraction_failure
 from app.core.job_run_logger import get_job_logger
 from app.langgraph.llm_utils import reset_global_usage, get_job_cost_summary
 from app.services.document_extraction_service import DocumentExtractionError
@@ -142,10 +142,11 @@ async def process_single_employment_detail(
             record_data=record_data
         )
 
-        if not document_text_string or not document_text_string.strip():
-            logger.warning(f"No text extracted from document for {readable_name} {employment_log_id}.")
-            fallback_summary = "Uploaded document contains no readable text or is missing."
-            summary_name = "Employment Verification Summary"
+        extraction_failure = detect_extraction_failure(document_text_string)
+        if extraction_failure:
+            logger.warning(f"Extraction failure for {readable_name} {employment_log_id}: {extraction_failure}")
+            fallback_summary = extraction_failure
+            summary_name = f"Employment Analysis ({item_index})" if item_index else "Employment Analysis"
             summary_record_id = await asyncio.to_thread(
                 sf_service.upsert_verification_summary,
                 application_id=parent_application_id,
@@ -154,8 +155,7 @@ async def process_single_employment_detail(
                 overall_feedback=fallback_summary,
                 confidence_range="0",
                 mismatched_field_list=None,
-                contact_id=actual_employment_detail_id,
-                related_field_name="Employment_Detail__c"
+                affiliation_id=actual_employment_detail_id
             )
             job_logger = get_job_logger()
             job_logger.add_detailed_record_log(
@@ -182,7 +182,7 @@ async def process_single_employment_detail(
         app_submission_date = None
         try:
             app_details = await asyncio.to_thread(
-                sf_service.get_record_detail_from_apex, parent_application_id, "hed__Application__c"
+                sf_service.get_record_detail_from_apex, parent_application_id, APPLICATION_OBJECT_API_NAME
             )
             if app_details:
                 app_submission_date = app_details.get("recordData", {}).get("hed__Application_Date__c")
@@ -222,31 +222,59 @@ async def process_single_employment_detail(
 
         logger.info(f"Successfully processed {readable_name} {employment_log_id}. AVS ID: {summary_id}")
 
-        # Create tasks for task-worthy mismatches (company name, salary, etc.)
-        from app.core.task_builder import extract_task_worthy_mismatches, build_task_from_mismatch
-        task_worthy = extract_task_worthy_mismatches(report_dict, report_dict.get('mismatched_field_list', ''))
+        # Create tasks for task-worthy mismatches (company name, salary, etc.).
+        # Task creation must never fail the record: the AVS is already written.
+        try:
+            from app.core.task_builder import extract_task_worthy_mismatches, build_task_from_mismatch
+            task_worthy = extract_task_worthy_mismatches(report_dict, report_dict.get('mismatched_field_list', ''))
 
-        if task_worthy:
-            # Fetch the Checklist Assignment user to assign tasks
-            owner_id = await sf_service.get_task_assignee_for_application(parent_application_id)
+            if task_worthy:
+                # Assign to whoever owns the DocumentChecklistItem (fallback: application owner)
+                owner_id = await sf_service.get_task_assignee_for_application(
+                    parent_application_id,
+                    dci_id=record_data.get("DocumentchecklistItem_Id"),
+                )
+                if not owner_id:
+                    no_owner_msg = (
+                        f"Mismatch tasks NOT created for {employment_log_id}: no task assignee "
+                        "(checklist owner and application owner both unavailable)."
+                    )
+                    logger.warning(no_owner_msg)
+                    job_logger.add_detailed_record_log(
+                        record_type=f"Employment_Tasks_{item_index or employment_log_id[:8]}",
+                        doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                        crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                        status="warning",
+                        error=no_owner_msg,
+                    )
 
-            for mismatch in task_worthy:
-                task_data = build_task_from_mismatch(
-                    field_name=mismatch['field_name'],
-                    record_value=mismatch['record_value'],
-                    document_value=mismatch['document_value'],
-                    notes=mismatch['notes'],
-                    confidence=mismatch['confidence'],
-                    dci_id=employment_log_id,
-                    application_id=parent_application_id,
-                    record_type_name="Employment",
-                )
-                await asyncio.to_thread(
-                    sf_service.create_verification_task,
-                    employment_log_id,
-                    task_data,
-                    owner_id,
-                )
+                for mismatch in task_worthy:
+                    task_data = build_task_from_mismatch(
+                        field_name=mismatch['field_name'],
+                        record_value=mismatch['record_value'],
+                        document_value=mismatch['document_value'],
+                        notes=mismatch['notes'],
+                        confidence=mismatch['confidence'],
+                        dci_id=employment_log_id,
+                        application_id=parent_application_id,
+                        record_type_name="Employment",
+                    )
+                    await asyncio.to_thread(
+                        sf_service.create_verification_task,
+                        employment_log_id,
+                        task_data,
+                        owner_id,
+                    )
+        except Exception as task_error:
+            task_err_msg = f"Task creation failed for {employment_log_id} (verification already saved): {task_error}"
+            logger.error(task_err_msg)
+            get_job_logger().add_detailed_record_log(
+                record_type=f"Employment_Tasks_{item_index or employment_log_id[:8]}",
+                doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
+                crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "error"},
+                status="warning",
+                error=task_err_msg[:500],
+            )
 
     except SalesforceAPIError as e:
         error_msg = str(e)

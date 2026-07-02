@@ -184,21 +184,31 @@ def build_verification_report(
     critical_field_names: Optional[Iterable[str]] = None,
     extra_fields: Optional[Dict[str, Any]] = None,
     allowed_fields: Optional[Iterable[str]] = None,
+    extra_allowed_fields: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
-    """Build the complete report contract without a synthesis LLM call."""
+    """Build the complete report contract without a synthesis LLM call.
+
+    `allowed_fields` is the record's verifiable field list; `extra_allowed_fields`
+    whitelists synthetic rows a prompt mandates (e.g. "Payslip Recency",
+    "Number of Semesters") that are not record fields.
+    """
     if not comparisons:
         raise ValueError("Cannot build a report without comparison results")
 
     # Server-side safety net: drop any LLM-hallucinated rows for fields not in
     # the verifiable_fields list (e.g. "Last Modified Date" from document metadata).
+    # Matching is normalized (case/punctuation-insensitive) so a legitimate row
+    # like "Employer Name" for record key "employerName" is not silently lost.
     if allowed_fields is not None:
-        allowed_set = set(allowed_fields)
+        allowed_set = {_normalized_field_name(f) for f in allowed_fields}
         # Always allow explicitly injected LLM reporting fields
-        allowed_set.add("Number of Semesters")
-        
+        allowed_set.add(_normalized_field_name("Number of Semesters"))
+        for extra in (extra_allowed_fields or ()):
+            allowed_set.add(_normalized_field_name(extra))
+
         comparisons = [
             item for item in comparisons
-            if item.get("field_name") in allowed_set
+            if _normalized_field_name(item.get("field_name")) in allowed_set
         ]
         if not comparisons:
             raise ValueError("All comparison rows were filtered out by allowed_fields")

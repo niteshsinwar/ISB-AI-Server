@@ -1,5 +1,4 @@
 import logging
-import os
 import json
 import re
 from typing import Dict, Any, List
@@ -40,7 +39,12 @@ _CRITICAL_EDUCATION_FIELDS = {
     "majorspecialization", "specialization", "major",
     "enddate", "to", "sfpassingyear",
     "gpa", "sfcgpapercentage", "percentage", "cgpa",
+    "numberofsemesters", "cgpascale",
 }
+
+# Prompt-mandated synthetic rows that are not record fields but must survive
+# the allowed-fields safety net in the reporter.
+_EDUCATION_SYNTHETIC_ROWS = {"Number of Semesters", "CGPA Scale"}
 
 
 def _normalized_field_name(value: Any) -> str:
@@ -191,7 +195,11 @@ EXPECTED OUTPUT:
 
         try:
             comparisons = parse_comparison_json(state['comparison_task_output'])
-            final_json = build_verification_report(comparisons)
+            final_json = build_verification_report(
+                comparisons,
+                allowed_fields=state.get('verifiable_fields'),
+                extra_allowed_fields=_EDUCATION_SYNTHETIC_ROWS,
+            )
             validated = ValidatedCrewReport(**final_json)
             return {"final_report": validated.model_dump()}
         except Exception as e:

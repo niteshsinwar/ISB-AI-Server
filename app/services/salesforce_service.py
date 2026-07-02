@@ -8,9 +8,7 @@ SalesforceService inherits from both so all existing imports remain unchanged.
 """
 import logging
 import asyncio
-import json
 import base64
-import time
 from simple_salesforce import (
     Salesforce,
     SalesforceAuthenticationFailed,
@@ -19,7 +17,7 @@ from simple_salesforce import (
     SalesforceExpiredSession
 )
 import requests
-from typing import Dict, Any, Optional, Callable, List
+from typing import Dict, Any, Optional, Callable
 
 from fastapi import HTTPException, Path
 
@@ -33,7 +31,6 @@ logger = logging.getLogger(__name__)
 # --- Custom Exception for clear error propagation ---
 class SalesforceAPIError(Exception):
     """Custom exception for Salesforce API errors that contains the response text."""
-    pass
 
 
 # --- Base class with shared infrastructure ---
@@ -138,7 +135,6 @@ class SalesforceService(AdmissionSFMixin, EedlSFMixin, _SalesforceBase):
     Full Salesforce service combining base infrastructure with track-specific mixins.
     All existing code imports SalesforceService from this module — that continues to work.
     """
-    pass
 
 
 # --- Connection Manager & FastAPI Dependencies ---

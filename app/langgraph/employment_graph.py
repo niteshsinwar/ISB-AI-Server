@@ -39,7 +39,13 @@ _EMPLOYMENT_CRITICAL_FIELDS = {
     "Compensation",
     "Salary",
     "CTC",
+    "Payslip Recency",
+    "Payslip",
 }
+
+# Prompt-mandated synthetic rows that are not record fields but must survive
+# the allowed-fields safety net in the reporter.
+_EMPLOYMENT_SYNTHETIC_ROWS = {"Payslip Recency", "Payslip"}
 
 
 def _route_after_classification(state: VerificationState) -> Literal["bank_statement_reporter", "comparator"]:
@@ -180,6 +186,7 @@ EXPECTED OUTPUT:
                 comparisons,
                 critical_field_names=_EMPLOYMENT_CRITICAL_FIELDS,
                 allowed_fields=state.get('verifiable_fields'),
+                extra_allowed_fields=_EMPLOYMENT_SYNTHETIC_ROWS,
             )
             validated = ValidatedCrewReport(**final_json)
             return {"final_report": validated.model_dump()}

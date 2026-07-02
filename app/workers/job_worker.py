@@ -183,7 +183,10 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
             )
         )
 
-        # Process all records sequentially by priority
+        # Process all records sequentially by priority.
+        # Per-record fault isolation: one bad record must not abort the rest of
+        # the job — remaining records still get verified and their AVS written.
+        failed_records = []
         for record_type, data in sorted_records:
             readable_name = all_readable_names.get(record_type, record_type)
 
@@ -214,17 +217,25 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
                     f"record {i+1}/{len(data['ids'])} (ID: {r_id})"
                 )
 
-                if record_type == APPLICATION_OBJECT_API_NAME:
-                    # Admission application processor has extra record_type positional arg
-                    await func(
-                        sf_service, r_id, application_id, record_type,
-                        item_index=(i + 1), extractor_instance=job_extractor,
+                try:
+                    if record_type == APPLICATION_OBJECT_API_NAME:
+                        # Admission application processor has extra record_type positional arg
+                        await func(
+                            sf_service, r_id, application_id, record_type,
+                            item_index=(i + 1), extractor_instance=job_extractor,
+                        )
+                    else:
+                        await func(
+                            sf_service, r_id, application_id,
+                            item_index=(i + 1), extractor_instance=job_extractor,
+                        )
+                except Exception as record_error:
+                    logger.error(
+                        f"Worker {os.getpid()}: {readable_name} record {r_id} failed: {record_error}",
+                        exc_info=True,
                     )
-                else:
-                    await func(
-                        sf_service, r_id, application_id,
-                        item_index=(i + 1), extractor_instance=job_extractor,
-                    )
+                    failed_records.append(f"{readable_name} ({r_id}): {str(record_error)[:300]}")
+                    progress[readable_name]["errors"] = progress[readable_name].get("errors", 0) + 1
 
                 progress[readable_name]["processed"] += 1
                 await _sf_upsert_job(
@@ -233,12 +244,22 @@ async def execute_job_in_process(job_data: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 _emit_progress_update(progress)
 
-            progress[readable_name]["status"] = "completed"
+            progress[readable_name]["status"] = (
+                "completed_with_errors" if progress[readable_name].get("errors") else "completed"
+            )
             await _sf_upsert_job(
                 sf_service, job_id, application_id, opportunity_id,
                 status="processing", progress_details=json.dumps(progress),
             )
             _emit_progress_update(progress)
+
+        # All record types attempted. If any individual record failed, surface a
+        # single aggregated failure AFTER the rest of the job has done its work.
+        if failed_records:
+            raise ValueError(
+                f"{len(failed_records)} record(s) failed during verification "
+                f"(all other records were processed): " + " | ".join(failed_records)
+            )
 
         # JOB COMPLETION - Now fetch existing logs, merge, and save
         # This is the ONLY place where logs field is updated

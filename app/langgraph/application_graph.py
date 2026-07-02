@@ -1,6 +1,6 @@
 import logging
 import json
-from typing import Dict, Any, List, Literal
+from typing import Dict, Any, List
 from langgraph.graph import StateGraph, END
 
 from app.config import (
@@ -30,8 +30,8 @@ FIELDS_TO_EXCLUDE_FROM_PROCESSING: List[str] = LLM_FIELD_EXCLUSIONS
 _ID_DOCUMENT_FIELD_MAP = {
     "PASSPORT": {
         "Passport", "Passport Number", "Passport_Number__c", "Passport Number__c",
-        "Passport Expiry", "Passport_Expiry__c", "Expiry Date", "Nationality",
-        "Passport Details"
+        "Passport Expiry", "Passport_Expiry__c", "PassportExpiryDate", "Expiry Date",
+        "Nationality", "Passport Details"
     },
     "AADHAAR": {
         "Aadhaar", "Aadhar", "Aadhaar Number", "Aadhar Number", "Aadhar Card Number",
@@ -59,7 +59,7 @@ _APPLICATION_CRITICAL_FIELDS = {
     "Birthdate", "Date of Birth", "Aadhar", "Aadhaar",
     "Aadhar Card Number", "Aadhaar Card Number",
     "Passport", "Passport Number", "ID Number", "Gender",
-    "Passport Expiry", "Nationality",
+    "Passport Expiry", "PassportExpiryDate", "Nationality",
 }
 
 
@@ -172,13 +172,15 @@ EXPECTED OUTPUT:
 
         try:
             comparisons = parse_comparison_json(state['comparison_task_output'])
-            
-            # Recalculate filtered fields so hallucinated irrelevant ID fields are dropped
+
+            # Recalculate filtered fields so hallucinated irrelevant ID fields are dropped.
+            # If verifiable_fields is unavailable, skip filtering rather than crash.
+            verifiable_fields = state.get('verifiable_fields')
             filtered_fields = _filter_fields_by_document_type(
-                state['verifiable_fields'],
+                verifiable_fields,
                 state.get('document_type')
-            )
-            
+            ) if verifiable_fields else None
+
             final_json = build_verification_report(
                 comparisons,
                 critical_field_names=_APPLICATION_CRITICAL_FIELDS,

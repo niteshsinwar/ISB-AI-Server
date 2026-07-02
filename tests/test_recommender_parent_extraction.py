@@ -13,7 +13,7 @@ class MockSFService:
     class SF:
         def query(self, query: str):
             if "ISB_Recommender_Details__c" in query:
-                return {"records": [{"Id": "123", "First_Name__c": "John", "Last_Name__c": "Doe", "Email__c": "a@a.com", "Mobile__c": "123", "Status__c": "Submitted"}]}
+                return {"records": [{"Id": "123", "First_Name__c": "John", "Last_Name__c": "Doe", "Email__c": "a@a.com", "MobilePhone__c": "123", "Status__c": "Submitted"}]}
             elif "ISB_Recommender_Response__c" in query:
                 return {"records": [{"Question__c": "Q", "Answer__c": "A"}]}
             elif "hed__Application__c" in query:

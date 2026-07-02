@@ -1,43 +1,38 @@
 """Task creation logic for verification mismatches requiring manual review."""
 import logging
-from typing import Dict, Any, List, Optional
+import re
+from typing import Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
-# Fields that trigger automatic task creation when mismatched
-TASK_TRIGGERING_FIELDS = {
-    "company_name", "employer_name", "organization",
-    "salary", "compensation", "ctc",
-    "college_name", "institute", "institution",
-    "cgpa", "gpa", "percentage",
-}
 
-# Normalize field names to task-triggering names
-FIELD_NAME_NORMALIZATION = {
-    "Company Name": "company_name",
-    "Employer Name": "company_name",
-    "Organization": "company_name",
-    "Compensation": "salary",
-    "Salary": "salary",
-    "CTC": "salary",
-    "College Name": "college_name",
-    "Institute": "college_name",
-    "Institution": "college_name",
-    "Institution Name": "college_name",
-    "Institution_Name__c": "college_name",
-    "CGPA": "cgpa",
-    "GPA": "cgpa",
-    "Percentage": "cgpa",
-    "hed__Compensation__c": "salary",
-    "hed__College_Name__c": "college_name",
-    "hed__CGPA__c": "cgpa",
+def _normalize_field_name(field_name: str) -> str:
+    """Casefold and strip all non-alphanumerics so 'SF CGPA/Percentage',
+    'employerName' and 'Employer Name' all compare consistently."""
+    return re.sub(r"[^a-z0-9]", "", (field_name or "").casefold())
+
+
+# Fields that trigger automatic task creation when mismatched.
+# Keys are normalized (see _normalize_field_name). Includes both human-readable
+# names the LLM may echo AND the exact keys the Apex payloads use:
+#   Employment payload: employerName, compensation
+#   Education payload:  School/Institute/Campus, SF CGPA/Percentage
+TASK_TRIGGERING_FIELDS = {
+    # Company name variants
+    "companyname", "employername", "organization", "employer",
+    # Salary variants
+    "salary", "compensation", "ctc", "hedcompensationc", "annualcompensation",
+    # College/institution variants
+    "collegename", "institute", "institution", "institutionname",
+    "institutionnamec", "hedcollegenamec", "schoolinstitutecampus",
+    # CGPA/GPA variants
+    "cgpa", "gpa", "percentage", "hedcgpac", "sfcgpapercentage", "gpapercentage",
 }
 
 
 def should_create_task_for_field(field_name: str) -> bool:
     """Check if a field mismatch should trigger a task."""
-    normalized = FIELD_NAME_NORMALIZATION.get(field_name, field_name.lower())
-    return normalized in TASK_TRIGGERING_FIELDS
+    return _normalize_field_name(field_name) in TASK_TRIGGERING_FIELDS
 
 
 def build_task_from_mismatch(

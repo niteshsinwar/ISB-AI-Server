@@ -1,7 +1,5 @@
 # project_root/app/processors/application_processor.py
 import logging
-import os
-import json
 import asyncio
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -11,7 +9,7 @@ from app.config import (
     MAX_SALESFORCE_REPORT_LENGTH,
     READABLE_OBJECT_NAMES
 )
-from app.core.processing_utils import should_skip_processing
+from app.core.processing_utils import should_skip_processing, detect_extraction_failure
 from app.core.job_run_logger import get_job_logger
 from app.langgraph.llm_utils import reset_global_usage, get_job_cost_summary
 from app.services.document_extraction_service import DocumentExtractionError
@@ -148,9 +146,10 @@ async def process_single_application_detail(
             record_data=record_data
         )
 
-        if not document_text_string or not document_text_string.strip():
-            logger.warning(f"No text extracted from document for {readable_name} {application_id}.")
-            fallback_summary = "Uploaded document contains no readable text or is missing."
+        extraction_failure = detect_extraction_failure(document_text_string)
+        if extraction_failure:
+            logger.warning(f"Extraction failure for {readable_name} {application_id}: {extraction_failure}")
+            fallback_summary = extraction_failure
             summary_name = "Personal Detail Analysis"
             summary_record_id = await asyncio.to_thread(
                 sf_service.upsert_verification_summary,

@@ -1,12 +1,10 @@
 import logging
 import json
-from typing import Any, Dict, Optional, Union, List
+from typing import Any, Dict, Optional
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 
-import tiktoken
 import requests
-from requests.adapters import HTTPAdapter
 
 from app.config import GEMINI_PRICING, GEMINI_DEFAULT_PRICING, LONG_CONTEXT_THRESHOLD
 
@@ -182,14 +180,6 @@ def _intercept_google_usage(self, method, url, *args, **kwargs):
 requests.Session.request = _intercept_google_usage
 # ---------------------------------------------------
 
-def _count_tokens(text: str) -> int:
-    """Count tokens using tiktoken (proxy available for offline estimation)."""
-    try:
-        encoding = tiktoken.get_encoding("cl100k_base")
-        return len(encoding.encode(text))
-    except Exception:
-        return 0
-
 def reset_global_usage():
     """Reset the global token usage accumulator in-place."""
     _GLOBAL_TOKEN_USAGE.clear()
@@ -201,10 +191,6 @@ def reset_global_usage():
         "total_cost_usd": 0.0,
         "cost_breakdown": []
     })
-
-def get_global_token_usage():
-    """Safe getter for the global token usage dict."""
-    return _GLOBAL_TOKEN_USAGE
 
 def get_job_cost_summary() -> Dict[str, Any]:
     """Get a summary of token usage and costs for the current job."""
@@ -285,113 +271,3 @@ def clean_and_extract_json(response_string: str) -> str:
 def log_error(message: str, exc_info: bool = True):
     """Log an error message with optional exception information."""
     logger.error(message, exc_info=exc_info)
-
-class CrewErrorHandler:
-    """Decorator to handle errors in crew execution, raising an exception on failure."""
-    def __call__(self, func):
-        def wrapper(*args, **kwargs):
-            try:
-                result = func(*args, **kwargs)
-                if isinstance(result, dict) and "error" in result:
-                    # If the crew's internal logic returns an error dict, raise it as an exception
-                    raise ValueError(f"Crew task failed: {result['error']}")
-                return result
-            except Exception as e:
-                # Catch any other unexpected exception during the crew's run
-                log_error(f"Critical error in crew execution: {e}")
-                # Re-raise the exception to be caught by the main processor, ensuring the job fails
-                raise ValueError(f"Crew execution failed: {e}")
-        return wrapper
-
-def log_step_info(step: Any):
-    """Log the internal dialogue/step of an agent and accumulate token usage."""
-    global _GLOBAL_TOKEN_USAGE
-    try:
-        # Standardize step identification
-        if hasattr(step, 'agent'):
-             logger.info(f"[Agent Step] Agent: {step.agent.role if hasattr(step.agent, 'role') else step.agent}")
-        
-        prompt_segment = ""
-        completion_segment = ""
-
-        if hasattr(step, 'thought'):
-             logger.info(f"[Agent Step] Thought: {step.thought}")
-             prompt_segment += str(step.thought)
-        if hasattr(step, 'tool'):
-             logger.info(f"[Agent Step] Tool: {step.tool}")
-             prompt_segment += str(step.tool)
-        if hasattr(step, 'tool_input'):
-             logger.info(f"[Agent Step] Input: {step.tool_input}")
-             prompt_segment += str(step.tool_input)
-        
-        # Output/Result
-        if hasattr(step, 'result'):
-             result_str = str(step.result)
-             logger.info(f"[Agent Step] Result found (length {len(result_str)})")
-             completion_segment += result_str
-        
-        # Calculate tokens
-        p_tokens = _count_tokens(prompt_segment)
-        c_tokens = _count_tokens(completion_segment)
-        
-
-        # Intercepting approach renders the step-based calculation redundant but good for backup.
-        # We will log the TEXT but not add to the accumulator here to avoid double counting 
-        # if the network interceptor is working. However, since the network interceptor works
-        # on the response level, and this works on the logical level, let's trust the network interceptor
-        # for 'exact' usage.
-        
-        # logger.info(f"[Token Tracker] Step added: {p_tokens} prompt, {c_tokens} completion.")
-
-    except Exception as e:
-        logger.warning(f"Failed to log step info: {e}")
-
-def get_crew_usage_metrics(crew_output: Any) -> Dict[str, Any]:
-    """Extract usage metrics from CrewOutput."""
-    try:
-        # Debugging: Log available attributes to find where token usage is hiding
-        logger.info(f"Inspecting CrewOutput attributes: {dir(crew_output)}")
-        if hasattr(crew_output, 'token_usage'):
-            logger.info(f"CrewOutput.token_usage raw: {crew_output.token_usage}")
-        if hasattr(crew_output, 'raw'):
-             logger.info(f"CrewOutput.raw length: {len(crew_output.raw)}")
-
-        if hasattr(crew_output, 'token_usage'):
-            usage = crew_output.token_usage
-            # Check if usage is empty/zero
-            usage_dict = {}
-            if hasattr(usage, 'model_dump'):
-                usage_dict = usage.model_dump()
-            elif isinstance(usage, dict):
-                usage_dict = usage
-            else:
-                 usage_dict = {
-                    "total_tokens": getattr(usage, 'total_tokens', 0),
-                    "prompt_tokens": getattr(usage, 'prompt_tokens', 0),
-                    "completion_tokens": getattr(usage, 'completion_tokens', 0),
-                    "successful_requests": getattr(usage, 'successful_requests', 0)
-                }
-            
-            # If crew usage is roughly empty but global usage has data, use global usage
-            if usage_dict.get("total_tokens", 0) == 0 and _GLOBAL_TOKEN_USAGE["total_tokens"] > 0:
-                 logger.info(f"Crew usage is empty. Using global interceptor usage: {_GLOBAL_TOKEN_USAGE}")
-                 return _GLOBAL_TOKEN_USAGE
-            
-            # Return combined or raw if valid
-            if usage_dict.get("total_tokens", 0) > 0:
-                return usage_dict
-
-        # Fallback to global if token_usage attr was missing or zero
-        if _GLOBAL_TOKEN_USAGE["total_tokens"] > 0:
-             logger.info("Using global accumulated token usage as fallback.")
-             return _GLOBAL_TOKEN_USAGE
-             
-        return {}
-
-    except Exception as e:
-        logger.warning(f"Failed to extract usage metrics: {e}")
-        # Fallback to global accumulator if extraction failed
-        if _GLOBAL_TOKEN_USAGE["total_tokens"] > 0:
-             logger.info("Using global accumulated token usage as fallback.")
-             return _GLOBAL_TOKEN_USAGE
-        return {}

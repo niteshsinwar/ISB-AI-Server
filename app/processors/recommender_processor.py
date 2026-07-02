@@ -1,14 +1,13 @@
 """Recommender detail verification processor for ISB applications."""
 import logging
-import os
 import asyncio
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from app.config import (
-    READABLE_OBJECT_NAMES,
     MAX_SALESFORCE_REPORT_LENGTH,
+    RECOMMENDER_DETAIL_OBJECT_API_NAME,
+    APPLICATION_OBJECT_API_NAME,
 )
-from app.core.processing_utils import should_skip_processing
 from app.core.job_run_logger import get_job_logger
 from app.langgraph.llm_utils import reset_global_usage, get_job_cost_summary
 from app.services.document_extraction_service import DocumentExtractionError
@@ -19,7 +18,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-RECOMMENDER_DETAIL_OBJECT = "ISB_Recommender_Details__c"
+RECOMMENDER_DETAIL_OBJECT = RECOMMENDER_DETAIL_OBJECT_API_NAME
 READABLE_NAME = "Recommender Detail"
 
 
@@ -49,6 +48,7 @@ async def process_single_recommender_detail(
     recommender_detail_id: str,
     application_id: str,
     item_index: Optional[int] = None,
+    extractor_instance=None,
 ):
     """
     Process recommender detail verification.
@@ -72,7 +72,7 @@ async def process_single_recommender_detail(
         recommender_data = await asyncio.to_thread(
             sf_service.sf.query,
             f"""
-            SELECT Id, First_Name__c, Last_Name__c, Email__c, Mobile__c, Status__c,
+            SELECT Id, First_Name__c, Last_Name__c, Email__c, MobilePhone__c, Status__c,
                    Application__c, Relationship_Type__c, Other_Relationship__c
             FROM {RECOMMENDER_DETAIL_OBJECT}
             WHERE Id = '{recommender_detail_id}'
@@ -116,7 +116,7 @@ async def process_single_recommender_detail(
             f"""
             SELECT Id, hed__Applicant__c, hed__Applicant__r.FirstName, hed__Applicant__r.LastName,
                    hed__Applicant__r.Email, hed__Applicant__r.MobilePhone
-            FROM hed__Application__c
+            FROM {APPLICATION_OBJECT_API_NAME}
             WHERE Id = '{application_id}'
             LIMIT 1
             """
@@ -139,7 +139,7 @@ async def process_single_recommender_detail(
             try:
                 # Use standard apex endpoint to get the Personal Detail doc (hed__Application__c)
                 app_details = await asyncio.to_thread(
-                    sf_service.get_record_detail_from_apex, application_id, "hed__Application__c"
+                    sf_service.get_record_detail_from_apex, application_id, APPLICATION_OBJECT_API_NAME
                 )
                 
                 if app_details and app_details.get("documentPayload"):
