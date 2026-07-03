@@ -43,6 +43,38 @@ def _format_error(record_id: str, component: str, reason: str, technical_error: 
     return f"({READABLE_NAME})-({record_id})-({component})-({reason}): {technical_error}"
 
 
+def extract_parent_name_from_id_text(doc_text: str) -> Optional[str]:
+    """AI zero-shot extraction of the parent/guardian name from a government
+    ID's text. Returns the name, or None when no parent name is present."""
+    from app.langgraph.graph_utils import get_llm
+    from app.config import MODEL_STANDARD_VERIFICATION
+
+    llm = get_llm(MODEL_STANDARD_VERIFICATION, temperature=0.0)
+    prompt = f"""
+You are an expert document parser. Read the following text extracted from an Indian Government ID (like Aadhaar, Passport, PAN, or Voter ID).
+Extract the Father's or Mother's name (or Husband/Guardian's name) as written on the ID.
+
+Return ONLY the full name of the parent/guardian. Do NOT include any prefixes like "S/O", "D/O", "W/O", "Father's Name:", etc.
+If no parent/guardian name can be found in the text, return exactly the word "Unknown".
+
+DOCUMENT TEXT:
+{doc_text}
+"""
+    response = llm.invoke(prompt)
+    extracted = (response.content if hasattr(response, 'content') else str(response)).strip().strip('"')
+    if extracted and extracted.lower() != "unknown" and len(extracted) > 2:
+        return extracted
+    return None
+
+
+# Canonical AVS name — MUST match the metadata convention used by the Apex
+# checklist automation and AVSTriggerHandler (RECOMMENDER_DETAILS constant).
+# One consolidated record per application covering ALL recommenders; a
+# different name here creates duplicate AVS records invisible to downstream
+# Salesforce automation (template routing, task subjects, DCI mapping).
+RECOMMENDER_AVS_NAME = "Recommender Details Analysis"
+
+
 async def process_single_recommender_detail(
     sf_service: "SalesforceService",
     recommender_detail_id: str,
@@ -51,57 +83,58 @@ async def process_single_recommender_detail(
     extractor_instance=None,
 ):
     """
-    Process recommender detail verification.
+    Process recommender verification for an application — CONSOLIDATED.
+
+    All ISB_Recommender_Details__c records of the application are verified and
+    merged into ONE Application_Verification_Summary__c named
+    'Recommender Details Analysis' (the org's metadata naming convention).
 
     Steps:
-    1. Fetch recommender detail record
-    2. Fetch recommender responses (ISB_Recommender_Response__c)
-    3. Fetch applicant personal details (for parents name from govt ID)
-    4. Run LangGraph verification
-    5. Upsert Application_Verification_Summary__c
+    1. Fetch ALL recommender detail records for the application
+    2. Fetch responses per recommender (ISB_Recommender_Response__c)
+    3. Fetch applicant personal details (parents name from govt ID)
+    4. Run LangGraph verification per recommender
+    5. Merge and upsert a single consolidated AVS
     """
 
-    logger.info(f"Starting {READABLE_NAME} processing for ID: {recommender_detail_id}")
+    logger.info(f"Starting {READABLE_NAME} processing for Application: {application_id}")
 
     try:
         # ============================================================================
-        # STEP 1: Fetch Recommender Detail from Salesforce
+        # STEP 1: Fetch ALL Recommender Details for the application
         # ============================================================================
-        logger.info(f"Fetching recommender detail: {recommender_detail_id}")
-
         recommender_data = await asyncio.to_thread(
             sf_service.sf.query,
             f"""
             SELECT Id, First_Name__c, Last_Name__c, Email__c, MobilePhone__c, Status__c,
                    Application__c, Relationship_Type__c, Other_Relationship__c
             FROM {RECOMMENDER_DETAIL_OBJECT}
-            WHERE Id = '{recommender_detail_id}'
-            LIMIT 1
+            WHERE Application__c = '{application_id}'
+            ORDER BY CreatedDate ASC
             """
         )
 
-        if not recommender_data.get('records'):
-            raise ValueError(f"Recommender detail not found: {recommender_detail_id}")
+        recommender_records = recommender_data.get('records', [])
+        if not recommender_records:
+            raise ValueError(f"No recommender details found for application: {application_id}")
 
-        recommender_record = recommender_data['records'][0]
-        logger.info(f"Recommender detail fetched: {recommender_record.get('Name', recommender_detail_id)}")
+        logger.info(f"Found {len(recommender_records)} recommender detail(s) for application")
 
         # ============================================================================
-        # STEP 2: Fetch Recommender Responses
+        # STEP 2: Fetch Responses per recommender
         # ============================================================================
-        logger.info(f"Fetching recommendation responses")
-
-        responses_data = await asyncio.to_thread(
-            sf_service.sf.query,
-            f"""
-            SELECT Id, Question__c, Section_Name__c, Answer__c, Score__c
-            FROM ISB_Recommender_Response__c
-            WHERE ISB_Recommender_Details__c = '{recommender_detail_id}'
-            """
-        )
-
-        responses = responses_data.get('records', [])
-        logger.info(f"Found {len(responses)} responses for recommender")
+        responses_by_recommender = {}
+        for rec in recommender_records:
+            responses_data = await asyncio.to_thread(
+                sf_service.sf.query,
+                f"""
+                SELECT Id, Question__c, Section_Name__c, Answer__c, Score__c
+                FROM ISB_Recommender_Response__c
+                WHERE ISB_Recommender_Details__c = '{rec['Id']}'
+                """
+            )
+            responses_by_recommender[rec['Id']] = responses_data.get('records', [])
+            logger.info(f"Recommender {rec['Id']}: {len(responses_by_recommender[rec['Id']])} response(s)")
 
         # ============================================================================
         # STEP 3: Fetch Applicant Details (name from Application/Contact, parents from ISB_Relationships)
@@ -163,24 +196,8 @@ async def process_single_recommender_detail(
                         
                         if doc_text and doc_text.strip():
                             logger.info("Document text extracted successfully. Running AI zero-shot extraction for parent name.")
-                            from app.langgraph.graph_utils import get_llm
-                            
-                            # Use complex reasoning model for better zero-shot extraction
-                            llm = get_llm("gemini-2.5-flash", temperature=0.0)
-                            prompt = f"""
-You are an expert document parser. Read the following text extracted from an Indian Government ID (like Aadhaar, Passport, PAN, or Voter ID).
-Extract the Father's or Mother's name (or Husband/Guardian's name) as written on the ID.
-
-Return ONLY the full name of the parent/guardian. Do NOT include any prefixes like "S/O", "D/O", "W/O", "Father's Name:", etc.
-If no parent/guardian name can be found in the text, return exactly the word "Unknown".
-
-DOCUMENT TEXT:
-{doc_text}
-"""
-                            response = llm.invoke(prompt)
-                            extracted_name = (response.content if hasattr(response, 'content') else str(response)).strip()
-                            
-                            if extracted_name and extracted_name.lower() != "unknown" and len(extracted_name) > 2:
+                            extracted_name = await asyncio.to_thread(extract_parent_name_from_id_text, doc_text)
+                            if extracted_name:
                                 parent_names.append(extracted_name)
                                 logger.info(f"AI Successfully extracted parent name from document: {extracted_name}")
                             else:
@@ -198,45 +215,75 @@ DOCUMENT TEXT:
             applicant_personal_detail = None
 
         # ============================================================================
-        # STEP 4: Reset usage and run LangGraph verification
+        # STEP 4: Run LangGraph verification per recommender and merge
         # ============================================================================
         reset_global_usage()
 
-        logger.info(f"Running LangGraph verification for {READABLE_NAME}")
+        logger.info(f"Running LangGraph verification for {len(recommender_records)} recommender(s)")
         from app.langgraph.recommender_graph import RecommenderGraphOrchestrator
 
-        orchestrator = RecommenderGraphOrchestrator(
-            recommender_record=recommender_record,
-            responses=responses,
-            applicant_personal_detail=applicant_personal_detail
-        )
-        report_dict = await asyncio.to_thread(orchestrator.run)
+        individual_reports = []
+        for idx, rec in enumerate(recommender_records, start=1):
+            orchestrator = RecommenderGraphOrchestrator(
+                recommender_record=rec,
+                responses=responses_by_recommender.get(rec['Id'], []),
+                applicant_personal_detail=applicant_personal_detail
+            )
+            rec_report = await asyncio.to_thread(orchestrator.run)
+            if not rec_report:
+                raise ValueError(f"Graph execution did not return a report for recommender {rec['Id']}.")
+            rec_name = f"{rec.get('First_Name__c') or ''} {rec.get('Last_Name__c') or ''}".strip() or rec['Id']
+            individual_reports.append((idx, rec_name, rec.get('Email__c') or '', rec_report))
+            logger.info(f"Recommender {idx}/{len(recommender_records)} ({rec_name}) verified: "
+                        f"confidence={rec_report.get('confidence_range')}")
 
-        if not report_dict:
-            raise ValueError("Graph execution did not return a valid report.")
+        # ---- Merge into ONE consolidated report (Apex naming convention) ----
+        multiple = len(individual_reports) > 1
+        confidences = [int(r[3].get('confidence_range') or 0) for r in individual_reports]
+        merged_confidence = min(confidences)
 
-        logger.info(f"Verification complete for {recommender_detail_id}")
+        feedback_sections, mismatch_sections, html_sections = [], [], []
+        for idx, rec_name, rec_email, rep in individual_reports:
+            prefix = f"Recommender {idx} ({rec_name})" if multiple else f"Recommender ({rec_name})"
+            feedback = rep.get('overall_feedback') or ''
+            feedback_sections.append(f"{prefix}: {feedback}" if multiple else feedback)
+            mismatched = rep.get('mismatched_field_list') or ''
+            if mismatched:
+                mismatch_sections.extend(
+                    (f"R{idx}:{m.strip()}" if multiple else m.strip())
+                    for m in mismatched.split(';') if m.strip()
+                )
+            heading = (
+                f"<h4 style='font-family:Arial;margin:12px 0 4px;'>"
+                f"Recommender {idx}: {rec_name} ({rec_email})</h4>" if multiple else ""
+            )
+            html_sections.append(heading + (rep.get('field_comparison_summary') or ''))
+
+        report_dict = {
+            "field_comparison_summary": "".join(html_sections),
+            "overall_feedback": " ".join(feedback_sections),
+            "confidence_range": str(merged_confidence),
+            "mismatched_field_list": "; ".join(mismatch_sections),
+        }
 
         # Capture processing usage
         crew_usage = _capture_usage()
-        logger.info(f"Graph processing usage for {recommender_detail_id}: {crew_usage}")
+        logger.info(f"Graph processing usage for application {application_id}: {crew_usage}")
 
         # ============================================================================
         # STEP 5: Log to job logger
         # ============================================================================
         job_logger = get_job_logger()
         job_logger.add_detailed_record_log(
-            record_type=f"Recommender_{item_index or recommender_detail_id[:8]}",
+            record_type=f"Recommender_x{len(recommender_records)}",
             doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
             crew_usage=crew_usage,
             status="completed"
         )
 
         # ============================================================================
-        # STEP 6: Upsert Verification Summary
+        # STEP 6: Upsert the single consolidated Verification Summary
         # ============================================================================
-        summary_name = f"Recommender Analysis ({item_index})" if item_index else "Recommender Analysis"
-
         # NOTE: Do NOT pass affiliation_id here. The AVS field Affiliation__c is a lookup
         # to hed__Affiliation__c only. Passing an ISB_Recommender_Details__c ID causes
         # "id value of incorrect type" errors because Salesforce validates the ID prefix.
@@ -244,14 +291,15 @@ DOCUMENT TEXT:
             sf_service.upsert_verification_summary,
             application_id=application_id,
             report_content=report_dict.get('field_comparison_summary', '')[:MAX_SALESFORCE_REPORT_LENGTH],
-            name_value=summary_name,
+            name_value=RECOMMENDER_AVS_NAME,
             overall_feedback=report_dict.get('overall_feedback'),
             confidence_range=report_dict.get('confidence_range'),
             mismatched_field_list=report_dict.get('mismatched_field_list'),
         )
 
-        logger.info(f"Successfully processed {READABLE_NAME} {recommender_detail_id}. AVS ID: {summary_id}")
-        return f"Processed {READABLE_NAME} successfully."
+        logger.info(f"Successfully processed {READABLE_NAME} for {application_id} "
+                    f"({len(recommender_records)} recommender(s)). AVS ID: {summary_id}")
+        return f"Processed {READABLE_NAME} successfully ({len(recommender_records)} recommender(s))."
 
     except SalesforceAPIError as e:
         error_msg = str(e)

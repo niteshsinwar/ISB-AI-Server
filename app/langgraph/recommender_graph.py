@@ -113,9 +113,12 @@ class RecommenderGraphOrchestrator:
 
     def _submission_validator_node(self, state: RecommenderState) -> RecommenderState:
         """
-        NODE 1 (DETERMINISTIC): Validate if recommendation is submitted.
+        NODE 1 (DETERMINISTIC): Validate submission status, response content
+        sufficiency, and declared family relationship.
 
-        Checks: Is recommendation status "Submitted"?
+        These three checks mirror the Apex checklist automation
+        (ApplicationVerificationGateway) so the Python result is a strict
+        superset — nothing is lost when this report overwrites the Apex one.
         """
         logger.info("Running submission validator node")
 
@@ -132,7 +135,40 @@ class RecommenderGraphOrchestrator:
             "type": "deterministic"
         })
 
-        logger.info(f"Submission status: {status} - {'SUBMITTED' if is_submitted else 'NOT SUBMITTED'}")
+        # Content sufficiency: at least one answer with >= 4 words (Apex parity)
+        has_sufficient = any(
+            len(str(resp.get("Answer__c") or "").split()) >= 4
+            for resp in (self.responses or [])
+        )
+        state["has_sufficient_response"] = has_sufficient
+        state["findings"].append({
+            "field": "response_content",
+            "check": "Has a response with sufficient content (min. 4 words)?",
+            "result": "PASS" if has_sufficient else "FAIL",
+            "value": f"{len(self.responses or [])} response(s)",
+            "type": "deterministic"
+        })
+
+        # Declared family relationship in Other_Relationship__c (Apex parity)
+        family_keywords = {
+            "brother", "sister", "father", "mother", "son", "daughter", "uncle",
+            "aunt", "cousin", "nephew", "niece", "husband", "wife",
+        }
+        other_rel = str(self.recommender_record.get("Other_Relationship__c") or "").lower()
+        declared_family = bool(other_rel) and any(k in other_rel for k in family_keywords)
+        state["declared_family_relationship"] = declared_family
+        if declared_family:
+            state["findings"].append({
+                "field": "declared_relationship",
+                "check": "Relationship declared by recommender",
+                "result": "FAIL (family member)",
+                "value": self.recommender_record.get("Other_Relationship__c"),
+                "type": "deterministic"
+            })
+
+        logger.info(
+            f"Submission: {status} | sufficient_response={has_sufficient} | declared_family={declared_family}"
+        )
 
         return state
 
@@ -424,45 +460,101 @@ Provide:
         """
         logger.info("Running report builder node")
 
-        # Build field_comparison_summary
-        summary_parts = []
+        # Build field_comparison_summary as an HTML table so the AVS
+        # Verification_Analysis_Report field renders consistently with every
+        # other analysis type (education/employment/etc.).
+        import html as _html
 
-        # Submission status
-        summary_parts.append(f"Recommendation Status: {state.get('submission_status', 'Unknown')}")
-        summary_parts.append(f"Is Submitted: {'Yes' if state.get('is_submitted') else 'No'}")
+        def _table_row(check, result, detail, ok):
+            background = "#e8f5e9" if ok else "#fde8e8"
+            cells = "".join(
+                f"<td style='border:1px solid #ddd;padding:8px;'>{_html.escape(str(v if v is not None else 'N/A'))}</td>"
+                for v in (check, result, detail)
+            )
+            return f"<tr style='background:{background};'>{cells}</tr>"
 
-        # Email classification
-        summary_parts.append(f"\nEmail Classification: {state.get('email_type', 'unknown').upper()}")
-        summary_parts.append(f"Email Address: {state.get('email', 'Not provided')}")
-
+        rows = []
+        rows.append(_table_row(
+            "Recommendation Submitted",
+            "Yes" if state.get('is_submitted') else "No",
+            f"Status: {state.get('submission_status', 'Unknown')}",
+            bool(state.get('is_submitted')),
+        ))
+        rows.append(_table_row(
+            "Response Content (min. 4 words)",
+            "Sufficient" if state.get('has_sufficient_response') else "Insufficient",
+            "At least one substantive answer required",
+            bool(state.get('has_sufficient_response')),
+        ))
+        rows.append(_table_row(
+            "Email Classification",
+            (state.get('email_type') or 'unknown').upper(),
+            state.get('email') or 'Not provided',
+            state.get('email_type') != 'personal',
+        ))
+        rows.append(_table_row(
+            "Recommender vs Applicant Name",
+            f"First: {'Match' if state.get('first_name_match') else 'Different'} / Last: {'Match' if state.get('last_name_match') else 'Different'}",
+            f"{state.get('recommender_first_name')} {state.get('recommender_last_name')} vs {state.get('applicant_first_name')} {state.get('applicant_last_name')}",
+            not state.get('last_name_match'),
+        ))
+        rows.append(_table_row(
+            "Email Cross-Match (fraud)",
+            "MATCH — SUSPICIOUS" if state.get('email_match') else "No match",
+            "Recommender email equals applicant email" if state.get('email_match') else "",
+            not state.get('email_match'),
+        ))
+        rows.append(_table_row(
+            "Mobile Cross-Match (fraud)",
+            "MATCH — SUSPICIOUS" if state.get('mobile_match') else "No match",
+            "Recommender mobile equals applicant mobile" if state.get('mobile_match') else "",
+            not state.get('mobile_match'),
+        ))
+        if state.get('declared_family_relationship'):
+            rows.append(_table_row(
+                "Declared Relationship",
+                "FAMILY MEMBER",
+                "Other_Relationship__c contains a family keyword",
+                False,
+            ))
         if state.get('email_type') == 'personal':
-            summary_parts.append(f"\nPersonal Email Reason Analysis:\n{state.get('personal_email_reason', 'Analysis not performed')}")
-
-        # Name matching
-        summary_parts.append(f"\nContact and Name Matching:")
-        summary_parts.append(f"  Recommender Name: {state.get('recommender_first_name')} {state.get('recommender_last_name')}")
-        summary_parts.append(f"  Applicant Name: {state.get('applicant_first_name')} {state.get('applicant_last_name')}")
-        summary_parts.append(f"  First Name Match: {'Yes' if state.get('first_name_match') else 'No'}")
-        summary_parts.append(f"  Last Name Match: {'Yes' if state.get('last_name_match') else 'No'}")
-        
-        if state.get('email_match'):
-            summary_parts.append(f"  Email Match: YES (Highly Suspicious)")
-        if state.get('mobile_match'):
-            summary_parts.append(f"  Mobile Match: YES (Highly Suspicious)")
-
-        # Family relationship (if last name match)
+            rows.append(_table_row(
+                "Personal Email Reason (AI)",
+                "Analyzed",
+                (state.get('personal_email_reason') or 'Analysis not performed')[:500],
+                True,
+            ))
         if state.get('last_name_match'):
-            summary_parts.append(f"\nFamily Relationship Assessment:")
-            summary_parts.append(f"  Probability: {state.get('family_relationship_probability', 'Unknown')}")
-            summary_parts.append(f"  Analysis:\n{state.get('family_relationship_analysis', 'Analysis not performed')}")
+            prob = state.get('family_relationship_probability', 'Unknown')
+            rows.append(_table_row(
+                "Family Relationship Probability (AI)",
+                prob,
+                (state.get('family_relationship_analysis') or 'Analysis not performed')[:500],
+                prob == 'Low',
+            ))
 
-        field_comparison_summary = "\n".join(summary_parts)
+        header = "".join(
+            f"<th style='border:1px solid #ddd;padding:8px;text-align:left;'>{h}</th>"
+            for h in ("Check", "Result", "Details")
+        )
+        field_comparison_summary = (
+            "<div style='font-family:Arial;'>"
+            "<table style='width:100%;border-collapse:collapse;border:1px solid #ddd;'>"
+            f"<thead><tr style='background:#f2f2f2;'>{header}</tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div>"
+        )
 
         # Build overall_feedback
         feedback_parts = []
 
         if not state.get('is_submitted'):
             feedback_parts.append("⚠️ Recommendation has not been submitted yet.")
+
+        if not state.get('has_sufficient_response'):
+            feedback_parts.append("⚠️ Recommender has not provided a response with sufficient content (min. 4 words).")
+
+        if state.get('declared_family_relationship'):
+            feedback_parts.append("⚠️ Recommender's declared relationship appears to be a family member.")
 
         if state.get('email_type') == 'personal':
             feedback_parts.append("ℹ️ Recommender used personal email address instead of corporate email.")
@@ -485,11 +577,15 @@ Provide:
         confidence = 100
         if not state.get('is_submitted'):
             confidence -= 20
+        if not state.get('has_sufficient_response'):
+            confidence -= 20
+        if state.get('declared_family_relationship'):
+            confidence -= 30
         if state.get('family_relationship_probability') == 'High':
             confidence -= 30
         elif state.get('family_relationship_probability') == 'Medium':
             confidence -= 15
-            
+
         if state.get('email_match'):
             confidence -= 50
         if state.get('mobile_match'):
@@ -499,6 +595,12 @@ Provide:
 
         # Build mismatched_field_list
         mismatched_fields = []
+        if not state.get('is_submitted'):
+            mismatched_fields.append('not_submitted')
+        if not state.get('has_sufficient_response'):
+            mismatched_fields.append('insufficient_response_content')
+        if state.get('declared_family_relationship'):
+            mismatched_fields.append('family_relationship_declared')
         if state.get('email_type') == 'personal':
             mismatched_fields.append('personal_email_used')
         if state.get('last_name_match'):

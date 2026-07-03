@@ -50,6 +50,10 @@ class RecommenderState(TypedDict):
     email_match: Optional[bool]
     mobile_match: Optional[bool]
 
+    # Content & relationship checks (parity with Apex checklist automation)
+    has_sufficient_response: Optional[bool]
+    declared_family_relationship: Optional[bool]
+
     # LLM analysis results
     personal_email_reason: Optional[str]
     family_relationship_probability: Optional[str]

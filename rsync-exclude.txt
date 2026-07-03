@@ -5,6 +5,11 @@ certs/
 .claude/
 .sfdx/
 
+# Test suite (never deployed to the remote server)
+tests/
+pytest.ini
+docs/
+
 # Python specific
 __pycache__/
 *.pyc

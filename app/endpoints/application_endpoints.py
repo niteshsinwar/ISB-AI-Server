@@ -61,6 +61,12 @@ def create_application_router(sf_service_dependency: Depends) -> APIRouter:
             except Exception as e:
                 error = str(e)
 
+            # Consolidated processors (e.g. Recommender) verify ALL child records
+            # in one pass and write ONE summary — the worker gets a single
+            # application-level work item when any children exist.
+            if config.get("consolidated") and ids:
+                ids = [application_record_id]
+
             metadata_list.append(RelatedRecordMetadata(
                 target_record_type=target_type,
                 retrieval_method=retrieval_method,

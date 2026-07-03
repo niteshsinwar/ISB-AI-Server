@@ -307,6 +307,77 @@ Date of Issue: 16/03/2017    Date of Expiry: 15/03/2027
 
 
 # ---------------------------------------------------------------------------
+# RECOMMENDER: parent-as-recommender fraud (excel rule: "If last name is
+# matching, check for Parents name on Govt ID proof")
+# ---------------------------------------------------------------------------
+
+AADHAAR_WITH_PARENT = """
+## Page 1
+भारत सरकार GOVERNMENT OF INDIA
+Unique Identification Authority of India (UIDAI)
+आधार AADHAAR
+Name: Arjun Mehta
+S/O: Rajesh Kumar Mehta
+DOB: 23/11/1994        Gender: MALE
+Address: 14 MG Road, Jaipur, Rajasthan 302001
+XXXX XXXX 7731
+"""
+
+
+def test_parent_name_scraped_from_aadhaar_text():
+    """Stage 1: the doc-extraction scrape must pull the parent name off the ID."""
+    from app.processors.recommender_processor import extract_parent_name_from_id_text
+    name = extract_parent_name_from_id_text(AADHAAR_WITH_PARENT)
+    assert name is not None, "parent name not extracted from Aadhaar text"
+    assert "rajesh" in name.lower() and "mehta" in name.lower(), name
+    assert "s/o" not in name.lower(), f"prefix not stripped: {name}"
+
+
+def test_parent_name_not_hallucinated_when_absent():
+    """Stage 1 negative: an ID without any parent name must return None."""
+    from app.processors.recommender_processor import extract_parent_name_from_id_text
+    doc = AADHAAR_WITH_PARENT.replace("S/O: Rajesh Kumar Mehta\n", "")
+    assert extract_parent_name_from_id_text(doc) is None
+
+
+def test_recommender_is_applicants_parent_flagged_as_family():
+    """Stage 2: last name matches AND the recommender's name equals the parent
+    name on the applicant's Aadhaar -> family detector must conclude High
+    probability and the report must penalize hard."""
+    from app.langgraph.recommender_graph import RecommenderGraphOrchestrator
+
+    recommender = {
+        "First_Name__c": "Rajesh",
+        "Last_Name__c": "Mehta",  # last name matches applicant -> LLM family node
+        "Email__c": "rajesh.mehta@bigcorp.com",
+        "MobilePhone__c": "+91 90000 11111",
+        "Status__c": "Submitted",
+    }
+    applicant = {
+        "First_Name__c": "Arjun",
+        "Last_Name__c": "Mehta",
+        "Email": "arjun.m@example.com",
+        "MobilePhone": "9876543210",
+        # Exactly what the processor populates after scraping the Aadhaar:
+        "Parents_Name_From_Government_ID__c": "Rajesh Kumar Mehta",
+        "Parents_Name__c": "Rajesh Kumar Mehta",
+    }
+    responses = [{
+        "Question__c": "How long have you known the applicant?",
+        "Answer__c": "I have known Arjun for many years and have closely "
+                     "watched him grow into a capable professional.",
+    }]
+
+    report = RecommenderGraphOrchestrator(recommender, responses, applicant).run()
+
+    assert "family_relationship_suspected" in report["mismatched_field_list"], report
+    assert "FAMILY RELATIONSHIP" in report["overall_feedback"].upper(), report["overall_feedback"]
+    # High probability -30 => 70; any additional penalty only lowers it further
+    assert int(report["confidence_range"]) <= 70, report["confidence_range"]
+    assert "<table" in report["field_comparison_summary"]
+
+
+# ---------------------------------------------------------------------------
 # TEST SCORE
 # ---------------------------------------------------------------------------
 

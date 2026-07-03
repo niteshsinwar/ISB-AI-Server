@@ -53,6 +53,14 @@ def test_recommender_fraud_flags_reach_final_report():
     assert "mobile_cross_match_fraud" in report["mismatched_field_list"]
     assert "FRAUD ALERT" in report["overall_feedback"]
     assert int(report["confidence_range"]) == 0
+    # Report must render as an HTML table (consistent with other AVS reports)
+    assert "<table" in report["field_comparison_summary"]
+
+
+_SUFFICIENT_RESPONSE = [{
+    "Question__c": "How do you know the applicant?",
+    "Answer__c": "I have supervised this applicant directly for four years.",
+}]
 
 
 def test_recommender_clean_path_full_confidence():
@@ -69,7 +77,7 @@ def test_recommender_clean_path_full_confidence():
         "Email": "jane@example.com",
         "MobilePhone": "9876543210",
     }
-    report = RecommenderGraphOrchestrator(recommender, [], applicant).run()
+    report = RecommenderGraphOrchestrator(recommender, _SUFFICIENT_RESPONSE, applicant).run()
     assert int(report["confidence_range"]) == 100
     assert report["mismatched_field_list"] == ""
 
@@ -80,7 +88,7 @@ def test_recommender_not_submitted_penalized():
         "Last_Name__c": "Verma",
         "Email__c": "amit@company.com",
         "MobilePhone__c": "1",
-        "Status__c": "Started",
+        "Status__c": "Sent to Core Engine",
     }
     applicant = {
         "First_Name__c": "Jane",
@@ -88,9 +96,48 @@ def test_recommender_not_submitted_penalized():
         "Email": "jane@example.com",
         "MobilePhone": "2",
     }
-    report = RecommenderGraphOrchestrator(recommender, [], applicant).run()
+    report = RecommenderGraphOrchestrator(recommender, _SUFFICIENT_RESPONSE, applicant).run()
     assert int(report["confidence_range"]) == 80
     assert "not been submitted" in report["overall_feedback"]
+    assert "not_submitted" in report["mismatched_field_list"]
+
+
+def test_recommender_insufficient_response_content_penalized():
+    """Apex parity: no substantive answer (>= 4 words) must be flagged."""
+    recommender = {
+        "First_Name__c": "Amit",
+        "Last_Name__c": "Verma",
+        "Email__c": "amit@company.com",
+        "MobilePhone__c": "1",
+        "Status__c": "Submitted",
+    }
+    applicant = {"First_Name__c": "Jane", "Last_Name__c": "Doe",
+                 "Email": "jane@example.com", "MobilePhone": "2"}
+    # No responses at all
+    report = RecommenderGraphOrchestrator(recommender, [], applicant).run()
+    assert int(report["confidence_range"]) == 80
+    assert "insufficient_response_content" in report["mismatched_field_list"]
+    # A 3-word answer is still insufficient
+    short = [{"Question__c": "Q", "Answer__c": "Very good candidate"}]
+    report2 = RecommenderGraphOrchestrator(recommender, short, applicant).run()
+    assert "insufficient_response_content" in report2["mismatched_field_list"]
+
+
+def test_recommender_declared_family_relationship_flagged():
+    """Apex parity: Other_Relationship__c containing a family keyword."""
+    recommender = {
+        "First_Name__c": "Amit",
+        "Last_Name__c": "Verma",
+        "Email__c": "amit@company.com",
+        "MobilePhone__c": "1",
+        "Status__c": "Submitted",
+        "Other_Relationship__c": "He is my Uncle",
+    }
+    applicant = {"First_Name__c": "Jane", "Last_Name__c": "Doe",
+                 "Email": "jane@example.com", "MobilePhone": "2"}
+    report = RecommenderGraphOrchestrator(recommender, _SUFFICIENT_RESPONSE, applicant).run()
+    assert "family_relationship_declared" in report["mismatched_field_list"]
+    assert int(report["confidence_range"]) == 70  # 100 - 30
 
 
 def test_recommender_handles_null_fields():

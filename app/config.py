@@ -349,7 +349,10 @@ RELATED_RECORD_PROCESSING_CONFIG: List[Dict[str, any]] = [
         "processor_module": "app.processors.recommender_processor",
         "processor_function_name": "process_single_recommender_detail",
         "priority": 6,
-        "filtering_criteria": None
+        "filtering_criteria": None,
+        # All recommenders are verified in ONE pass producing ONE consolidated
+        # AVS named 'Recommender Details Analysis' (org metadata convention).
+        "consolidated": True
     }
 ]
 
