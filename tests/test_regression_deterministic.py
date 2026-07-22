@@ -201,6 +201,46 @@ def test_extract_task_worthy_handles_na_and_empty():
     assert extract_task_worthy_mismatches({}, None) == []
 
 
+def test_extract_task_worthy_ignores_dirty_mismatched_field_list():
+    """Regression: prod investigation (2026-07) found live prod AVS records
+    where mismatched_field_list embeds 'field:reason' pairs, e.g.
+    'employerName:not found on document;compensation:not found on document'.
+    The old exact-string gate (`field in field_names`) never matched the bare
+    field_name from the report rows against these polluted entries, so ZERO
+    tasks were ever created for confirmed salary/company/CGPA mismatches on
+    at least 5 production applications. Extraction must rely only on each
+    row's own `status`, never on parsing this free-form string."""
+    report = {
+        "verification_analysis_report": [
+            {"field_name": "employerName", "record_value": "Acme", "document_value": None,
+             "status": "MISMATCH", "confidence": 0, "notes": "not found on document"},
+            {"field_name": "compensation", "record_value": "1200000", "document_value": None,
+             "status": "MISMATCH", "confidence": 0, "notes": "not found on document"},
+            {"field_name": "jobTitle", "record_value": "Engineer", "document_value": None,
+             "status": "MISMATCH", "confidence": 0, "notes": "not found on document"},
+        ]
+    }
+    dirty_list = "employerName:not found on document;jobTitle:not found on document;compensation:not found on document"
+    worthy = extract_task_worthy_mismatches(report, dirty_list)
+    assert {m["field_name"] for m in worthy} == {"employerName", "compensation"}, worthy
+
+
+def test_extract_task_worthy_gates_on_row_status_not_the_list_string():
+    """mismatched_field_list can be entirely absent/wrong; a MISMATCH row for
+    a task-triggering field must still surface a task."""
+    report = {
+        "verification_analysis_report": [
+            {"field_name": "SF CGPA/Percentage", "record_value": "8.1", "document_value": "7.4",
+             "status": "MISMATCH", "confidence": 60, "notes": "cgpa differs"},
+            {"field_name": "SF Full Name", "record_value": "A", "document_value": "A",
+             "status": "MATCH", "confidence": 100, "notes": ""},
+        ]
+    }
+    # No mismatched_field_list passed at all (default "")
+    worthy = extract_task_worthy_mismatches(report)
+    assert {m["field_name"] for m in worthy} == {"SF CGPA/Percentage"}
+
+
 # ---------------------------------------------------------------------------
 # 3. report_builder must keep synthetic rows and tolerate case differences
 # ---------------------------------------------------------------------------

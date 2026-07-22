@@ -94,9 +94,10 @@ if task_worthy and owner_id:
             document_value=mismatch['document_value'],
             notes=mismatch['notes'],
             confidence=mismatch['confidence'],
-            dci_id=employment_log_id,
+            child_record_id=employment_log_id,
             application_id="test-app",
             record_type_name="Employment",
+            child_record_label="Acme Corp",
         )
 
         print(f"\n  Creating task for: {mismatch['field_name']}")

@@ -169,9 +169,10 @@ task_data = build_task_from_mismatch(
     document_value="Acme Corporation",
     notes="Name variation detected but likely same entity",
     confidence=75,
-    dci_id="a0zIp000000HbIbIAK",
+    child_record_id="a0zIp000000HbIbIAK",
     application_id="a3l5j000000DLuXAAW",
     record_type_name="Employment",
+    child_record_label="Acme Corp",
 )
 
 print(f"\nTask data structure check:")

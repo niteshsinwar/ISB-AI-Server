@@ -242,43 +242,104 @@ class AdmissionSFMixin:
                 logger.error(f"Failed to update DocumentChecklistItem {dci_id}: {e}")
                 raise SalesforceAPIError(f"Failed to link summary {summary_id} to DCI {dci_id}: {e}")
 
+    def _find_open_task_id(self, what_id: str, subject: str) -> Optional[str]:
+        """
+        Return the Id of the most recent OPEN (not-closed) Task with this exact
+        Subject hanging off `what_id`, or None. Uses Task.IsClosed so it honours
+        whatever statuses the org marks as closed, not just 'Completed'.
+        """
+        if not what_id or not subject:
+            return None
+        # Escape backslashes then single quotes for the SOQL string literal —
+        # Subject is composed from field names / labels and can contain quotes.
+        safe_subject = subject.replace("\\", "\\\\").replace("'", "\\'")
+        soql = (
+            "SELECT Id FROM Task "
+            f"WHERE WhatId = '{what_id}' AND Subject = '{safe_subject}' "
+            "AND IsClosed = false ORDER BY CreatedDate DESC LIMIT 1"
+        )
+        try:
+            result = self._call_sf_api_with_retry(lambda: self.sf.query(soql))
+            if result.get('totalSize', 0) > 0:
+                return result['records'][0]['Id']
+        except Exception as e:
+            logger.warning(f"Could not check for existing open task on {what_id}: {e}")
+        return None
+
     def create_verification_task(
         self,
-        dci_id: str,
+        what_id: str,
         task_data: Dict[str, Any],
         owner_id: Optional[str] = None,
     ) -> Optional[str]:
         """
-        Create a Salesforce Task for verification mismatches requiring manual review.
+        Create (or refresh) a Salesforce Task for a verification mismatch.
+
+        Dedup rule: if an OPEN task with the same Subject already hangs off
+        `what_id`, its details are refreshed in place instead of inserting a
+        duplicate. CLOSED tasks are left untouched — a recurrence of the same
+        mismatch after resolution gets a brand-new task.
 
         Args:
-            dci_id: DocumentChecklistItem ID (WhatId)
+            what_id: Record to attach as the Task's WhatId ("Related To").
+                     This is the parent Application, so all mismatch tasks for an
+                     applicant roll up under one record.
             task_data: Dict with Subject, Description, Status, Priority
-            owner_id: User/Queue ID for WhoId (OwnerId)
+            owner_id: Optional User/Queue ID for OwnerId. When None, a NEW task is
+                      still created; Salesforce defaults OwnerId to the integration
+                      (running) user so the mismatch is never silently dropped.
 
         Returns:
-            Task ID if created, None if owner_id is missing
+            Task ID of the created or updated task.
         """
         from app.services.salesforce_service import SalesforceAPIError
-
-        if not owner_id:
-            logger.warning(f"Cannot create task for DCI {dci_id}: no owner_id (Checklist_Verification_Assigned_To field not populated)")
-            return None
 
         self._ensure_connected()
 
         try:
+            task_handler = getattr(self.sf, 'Task')
+            subject = task_data.get("Subject")
+
+            # Refresh an existing OPEN task rather than creating a duplicate.
+            # Owner and Status are intentionally left alone so we don't yank a
+            # task away from whoever is already working it.
+            existing_open_id = self._find_open_task_id(what_id, subject)
+            if existing_open_id:
+                update_fields = {
+                    "Description": task_data.get("Description"),
+                    "Priority": task_data.get("Priority", "High"),
+                }
+                self._call_sf_api_with_retry(
+                    lambda: task_handler.update(existing_open_id, update_fields)
+                )
+                logger.info(
+                    f"Refreshed existing OPEN verification task {existing_open_id} "
+                    f"on {what_id} (dedup on Subject); no duplicate created."
+                )
+                return existing_open_id
+
             task_record = {
                 **task_data,
-                "WhatId": dci_id,
-                "OwnerId": owner_id,
+                "WhatId": what_id,
             }
-            task_handler = getattr(self.sf, 'Task')
+            if owner_id:
+                task_record["OwnerId"] = owner_id
+            else:
+                # No resolvable assignee: omit OwnerId so SF defaults it to the
+                # integration user rather than skipping the task entirely.
+                task_record.pop("OwnerId", None)
+                logger.warning(
+                    f"Creating task on {what_id} with no explicit owner; "
+                    "OwnerId will default to the integration user."
+                )
             task_id = self._call_sf_api_with_retry(lambda: task_handler.create(task_record))
-            logger.info(f"Created verification task {task_id} for DCI {dci_id}, assigned to {owner_id}")
+            logger.info(
+                f"Created verification task {task_id} on {what_id}, "
+                f"owner={owner_id or 'default(integration user)'}"
+            )
             return task_id
         except Exception as e:
-            logger.error(f"Failed to create task for DCI {dci_id}: {e}")
+            logger.error(f"Failed to create task on {what_id}: {e}")
             raise SalesforceAPIError(f"Failed to create verification task: {e}")
 
     # -----------------------------------------------------------------------

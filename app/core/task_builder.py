@@ -41,12 +41,20 @@ def build_task_from_mismatch(
     document_value: str,
     notes: str,
     confidence: int,
-    dci_id: str,
+    child_record_id: str,
     application_id: str,
     record_type_name: str = "Verification",
+    child_record_label: str = None,
 ) -> Dict[str, Any]:
     """
     Build a Salesforce Task record for a verification mismatch.
+
+    The Task's WhatId ("Related To") points at the parent **Application** so
+    that every mismatch task for an applicant rolls up under one record. Because
+    the specific child record (Employment/Education log) is therefore NOT the
+    WhatId, its type + Id (+ a human-readable label when available) are baked
+    into the Subject and Description so a reviewer can still identify exactly
+    which child record and which check the task is about.
 
     Args:
         field_name: Name of the mismatched field
@@ -54,21 +62,25 @@ def build_task_from_mismatch(
         document_value: Value extracted from document
         notes: LLM reasoning/notes
         confidence: Confidence percentage
-        dci_id: DocumentChecklistItem ID (WhatId)
-        application_id: Application ID (for context)
+        child_record_id: Employment/Education log record ID (for identification only)
+        application_id: Application ID — becomes the Task WhatId
         record_type_name: Type of record (Employment, Education, etc.)
+        child_record_label: Human-readable child name (e.g. employer/college), optional
 
     Returns:
         Dict with Task fields ready for Salesforce
     """
-    subject = f"Review {field_name} Mismatch - {record_type_name}"
+    label_part = f" - {child_record_label}" if child_record_label else ""
+    subject = f"Review {field_name} Mismatch - {record_type_name}{label_part}"
 
+    child_line = child_record_label or "N/A"
     description = f"""
 VERIFICATION MISMATCH DETECTED
 
 Field: {field_name}
 Record Type: {record_type_name}
 Application: {application_id}
+Related {record_type_name} Record: {child_line} (Id: {child_record_id})
 
 Salesforce Value: {record_value or 'NOT PROVIDED'}
 Document Value: {document_value or 'NOT FOUND'}
@@ -77,6 +89,7 @@ LLM Confidence: {confidence}%
 LLM Notes: {notes}
 
 ACTION REQUIRED:
+- Open the {record_type_name} record above (Id: {child_record_id})
 - Verify the correct value from the document
 - Update the Salesforce record if needed
 - Close this task once resolved
@@ -85,36 +98,48 @@ ACTION REQUIRED:
     return {
         "Subject": subject,
         "Description": description,
-        "WhatId": dci_id,
-        # WhoId will be set by caller (from assignment field)
+        "WhatId": application_id,  # parent Application — one rollup point per applicant
+        # OwnerId is set by the caller when an assignee resolves; if none does,
+        # the task is still created and Salesforce defaults it to the integration user.
         "Status": "Open",
         "Priority": "High",
         "ActivityDate": None,  # Today's date
     }
 
 
+_MATCH_STATUSES = {"MATCH", "MATCHED", "PASS", "PASSED", "VERIFIED"}
+
+
 def extract_task_worthy_mismatches(
     verification_report: Dict[str, Any],
-    mismatched_field_list: str,
+    mismatched_field_list: str = "",
 ) -> List[Dict[str, Any]]:
     """
     Extract task-worthy mismatches from the verification report.
 
+    Reads each row's own `status` field directly — it does NOT re-parse
+    `mismatched_field_list` for gating. That string is free-form text meant
+    for human/UI display; historical reports have embedded "field:reason"
+    pairs in it (confirmed in prod data), which silently defeated an exact
+    `field in field_names` string match here and meant task creation never
+    fired for those records even though the field names themselves would
+    have matched `should_create_task_for_field`. `mismatched_field_list` is
+    now unused for logic and kept only for backward-compatible call sites.
+
     Returns list of {field_name, record_value, document_value, notes, confidence}
     for fields that should trigger task creation.
     """
-    if not mismatched_field_list:
+    report_rows = verification_report.get("verification_analysis_report", [])
+    if not report_rows:
         return []
 
     task_worthy = []
-    report_rows = verification_report.get("verification_analysis_report", [])
-
-    # Parse mismatched_field_list (might be "field1; field2" or "field1, field2")
-    field_names = [f.strip() for f in mismatched_field_list.replace(";", ",").split(",")]
-
     for row in report_rows:
         field = row.get("field_name", "")
-        if field in field_names and should_create_task_for_field(field):
+        status = str(row.get("status") or "").strip().upper()
+        if status in _MATCH_STATUSES:
+            continue
+        if should_create_task_for_field(field):
             task_worthy.append({
                 "field_name": field,
                 "record_value": row.get("record_value"),

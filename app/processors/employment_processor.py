@@ -229,24 +229,22 @@ async def process_single_employment_detail(
             task_worthy = extract_task_worthy_mismatches(report_dict, report_dict.get('mismatched_field_list', ''))
 
             if task_worthy:
-                # Assign to whoever owns the DocumentChecklistItem (fallback: application owner)
+                # Preferred assignee: whoever owns the DocumentChecklistItem
+                # (fallback: application owner). Owner is now optional — if none
+                # resolves the task is still created under the integration user.
                 owner_id = await sf_service.get_task_assignee_for_application(
                     parent_application_id,
                     dci_id=record_data.get("DocumentchecklistItem_Id"),
                 )
                 if not owner_id:
-                    no_owner_msg = (
-                        f"Mismatch tasks NOT created for {employment_log_id}: no task assignee "
-                        "(checklist owner and application owner both unavailable)."
+                    logger.warning(
+                        f"No task assignee resolved for {employment_log_id}; "
+                        "mismatch tasks will be created with the default (integration user) owner."
                     )
-                    logger.warning(no_owner_msg)
-                    job_logger.add_detailed_record_log(
-                        record_type=f"Employment_Tasks_{item_index or employment_log_id[:8]}",
-                        doc_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
-                        crew_usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "model": "skipped"},
-                        status="warning",
-                        error=no_owner_msg,
-                    )
+
+                # Human-readable label so the child Employment record stays
+                # identifiable now that the Task's WhatId is the Application.
+                child_label = record_data.get("employerName") or record_data.get("Name")
 
                 for mismatch in task_worthy:
                     task_data = build_task_from_mismatch(
@@ -255,13 +253,14 @@ async def process_single_employment_detail(
                         document_value=mismatch['document_value'],
                         notes=mismatch['notes'],
                         confidence=mismatch['confidence'],
-                        dci_id=employment_log_id,
+                        child_record_id=employment_log_id,
                         application_id=parent_application_id,
                         record_type_name="Employment",
+                        child_record_label=child_label,
                     )
                     await asyncio.to_thread(
                         sf_service.create_verification_task,
-                        employment_log_id,
+                        parent_application_id,
                         task_data,
                         owner_id,
                     )
