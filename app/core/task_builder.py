@@ -5,6 +5,9 @@ from typing import Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
+# Salesforce hard limit on Task.Subject; exceeding it fails the create/update.
+SUBJECT_MAX_LENGTH = 255
+
 
 def _normalize_field_name(field_name: str) -> str:
     """Casefold and strip all non-alphanumerics so 'SF CGPA/Percentage',
@@ -70,8 +73,20 @@ def build_task_from_mismatch(
     Returns:
         Dict with Task fields ready for Salesforce
     """
-    label_part = f" - {child_record_label}" if child_record_label else ""
-    subject = f"Review {field_name} Mismatch - {record_type_name}{label_part}"
+    # Subject = stable prefix + optional label. Salesforce caps Task.Subject at
+    # 255 chars; if a long label (e.g. an address-style institution name) would
+    # blow that, trim ONLY the label — never the prefix, which is the dedup key
+    # (see _find_open_task_id). The full label always survives in the Description.
+    subject = f"Review {field_name} Mismatch - {record_type_name}"
+    if child_record_label:
+        candidate = f"{subject} - {child_record_label}"
+        if len(candidate) <= SUBJECT_MAX_LENGTH:
+            subject = candidate
+        else:
+            room = SUBJECT_MAX_LENGTH - len(subject) - len(" - ")
+            if room > 1:
+                subject = f"{subject} - {child_record_label[:room - 1]}…"
+            # else: no room for any label — keep the prefix alone
 
     child_line = child_record_label or "N/A"
     description = f"""

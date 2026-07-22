@@ -244,18 +244,28 @@ class AdmissionSFMixin:
 
     def _find_open_task_id(self, what_id: str, subject: str) -> Optional[str]:
         """
-        Return the Id of the most recent OPEN (not-closed) Task with this exact
-        Subject hanging off `what_id`, or None. Uses Task.IsClosed so it honours
-        whatever statuses the org marks as closed, not just 'Completed'.
+        Return the Id of the most recent OPEN (not-closed) verification Task on
+        `what_id`, or None. Uses Task.IsClosed so it honours whatever statuses
+        the org marks as closed, not just 'Completed'.
+
+        Matches on the STABLE Subject prefix — 'Review <field> Mismatch - <Type>'
+        — via LIKE, deliberately ignoring the trailing ' - <label>'. The label
+        (employer / institution) can be sourced differently by a live run vs a
+        migrated record, so keying dedup on it would spawn duplicates; the prefix
+        (field + record type) is what actually identifies the check.
         """
         if not what_id or not subject:
             return None
-        # Escape backslashes then single quotes for the SOQL string literal —
-        # Subject is composed from field names / labels and can contain quotes.
-        safe_subject = subject.replace("\\", "\\\\").replace("'", "\\'")
+        # Segments 1-2 are 'Review <field> Mismatch' and '<Type>'; neither the
+        # field names nor the record types contain ' - ', so this cleanly drops
+        # the optional label suffix (segment 3+).
+        prefix = " - ".join(subject.split(" - ")[:2])
+        # Escape backslash, then SOQL-LIKE wildcards, then the quote (order matters).
+        safe = (prefix.replace("\\", "\\\\").replace("%", "\\%")
+                      .replace("_", "\\_").replace("'", "\\'"))
         soql = (
             "SELECT Id FROM Task "
-            f"WHERE WhatId = '{what_id}' AND Subject = '{safe_subject}' "
+            f"WHERE WhatId = '{what_id}' AND Subject LIKE '{safe}%' "
             "AND IsClosed = false ORDER BY CreatedDate DESC LIMIT 1"
         )
         try:
