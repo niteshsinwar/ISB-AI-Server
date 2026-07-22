@@ -229,18 +229,7 @@ async def process_single_employment_detail(
             task_worthy = extract_task_worthy_mismatches(report_dict, report_dict.get('mismatched_field_list', ''))
 
             if task_worthy:
-                # Preferred assignee: whoever owns the DocumentChecklistItem
-                # (fallback: application owner). Owner is now optional — if none
-                # resolves the task is still created under the integration user.
-                owner_id = await sf_service.get_task_assignee_for_application(
-                    parent_application_id,
-                    dci_id=record_data.get("DocumentchecklistItem_Id"),
-                )
-                if not owner_id:
-                    logger.warning(
-                        f"No task assignee resolved for {employment_log_id}; "
-                        "mismatch tasks will be created with the default (integration user) owner."
-                    )
+                # Tasks are created UNASSIGNED (no owner) — see create_verification_task.
 
                 # Human-readable label so the child Employment record stays
                 # identifiable now that the Task's WhatId is the Application.
@@ -262,7 +251,6 @@ async def process_single_employment_detail(
                         sf_service.create_verification_task,
                         parent_application_id,
                         task_data,
-                        owner_id,
                     )
         except Exception as task_error:
             task_err_msg = f"Task creation failed for {employment_log_id} (verification already saved): {task_error}"

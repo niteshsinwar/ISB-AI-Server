@@ -280,10 +280,13 @@ class AdmissionSFMixin:
         self,
         what_id: str,
         task_data: Dict[str, Any],
-        owner_id: Optional[str] = None,
     ) -> Optional[str]:
         """
         Create (or refresh) a Salesforce Task for a verification mismatch.
+
+        AI-created tasks are intentionally left UNASSIGNED: no OwnerId is set, so
+        Salesforce assigns the task to the integration (running) user rather than
+        any real reviewer. (Task.OwnerId cannot be null on the platform.)
 
         Dedup rule: if an OPEN task with the same Subject already hangs off
         `what_id`, its details are refreshed in place instead of inserting a
@@ -295,9 +298,6 @@ class AdmissionSFMixin:
                      This is the parent Application, so all mismatch tasks for an
                      applicant roll up under one record.
             task_data: Dict with Subject, Description, Status, Priority
-            owner_id: Optional User/Queue ID for OwnerId. When None, a NEW task is
-                      still created; Salesforce defaults OwnerId to the integration
-                      (running) user so the mismatch is never silently dropped.
 
         Returns:
             Task ID of the created or updated task.
@@ -311,8 +311,7 @@ class AdmissionSFMixin:
             subject = task_data.get("Subject")
 
             # Refresh an existing OPEN task rather than creating a duplicate.
-            # Owner and Status are intentionally left alone so we don't yank a
-            # task away from whoever is already working it.
+            # Status is intentionally left alone so we don't disturb one in progress.
             existing_open_id = self._find_open_task_id(what_id, subject)
             if existing_open_id:
                 update_fields = {
@@ -328,25 +327,12 @@ class AdmissionSFMixin:
                 )
                 return existing_open_id
 
-            task_record = {
-                **task_data,
-                "WhatId": what_id,
-            }
-            if owner_id:
-                task_record["OwnerId"] = owner_id
-            else:
-                # No resolvable assignee: omit OwnerId so SF defaults it to the
-                # integration user rather than skipping the task entirely.
-                task_record.pop("OwnerId", None)
-                logger.warning(
-                    f"Creating task on {what_id} with no explicit owner; "
-                    "OwnerId will default to the integration user."
-                )
+            # OwnerId is deliberately never set — the task stays unassigned and
+            # Salesforce owns it as the integration user (no real reviewer).
+            task_record = {k: v for k, v in task_data.items() if k != "OwnerId"}
+            task_record["WhatId"] = what_id
             task_id = self._call_sf_api_with_retry(lambda: task_handler.create(task_record))
-            logger.info(
-                f"Created verification task {task_id} on {what_id}, "
-                f"owner={owner_id or 'default(integration user)'}"
-            )
+            logger.info(f"Created unassigned verification task {task_id} on {what_id}.")
             return task_id
         except Exception as e:
             logger.error(f"Failed to create task on {what_id}: {e}")
@@ -474,50 +460,6 @@ class AdmissionSFMixin:
             if not isinstance(e, SalesforceAPIError):
                 raise SalesforceAPIError(f"Failed to query for Contact ID: {e}")
             raise
-
-    async def get_task_assignee_for_application(
-        self,
-        application_id: str,
-        dci_id: Optional[str] = None,
-    ) -> Optional[str]:
-        """
-        Retrieves the User ID to assign mismatch-review tasks to.
-
-        Business rule: the task goes to whoever OWNS the DocumentChecklistItem
-        (the checklist record the applicant's document hangs off). Falls back
-        to the Application's OwnerId only when no checklist owner can be
-        resolved, so a task always reaches a responsible human.
-        """
-        from app.core.processing_utils import is_valid_salesforce_id
-        self._ensure_connected()
-
-        # Primary: DocumentChecklistItem owner
-        if dci_id and is_valid_salesforce_id(dci_id):
-            try:
-                soql_dci = f"SELECT OwnerId FROM DocumentChecklistItem WHERE Id = '{dci_id}' LIMIT 1"
-                def do_dci_query():
-                    return self._call_sf_api_with_retry(lambda: self.sf.query(soql_dci))
-                dci_result = await asyncio.get_event_loop().run_in_executor(None, do_dci_query)
-                if dci_result.get('totalSize'):
-                    owner_id = dci_result['records'][0].get('OwnerId')
-                    if owner_id:
-                        return owner_id
-                logger.warning(f"DocumentChecklistItem {dci_id} has no resolvable owner; falling back to Application owner.")
-            except Exception as e:
-                logger.warning(f"Failed to fetch DCI owner for {dci_id}: {e}; falling back to Application owner.")
-
-        # Fallback: Application owner
-        try:
-            soql_app = f"SELECT OwnerId FROM {APPLICATION_OBJECT_API_NAME} WHERE Id = '{application_id}' LIMIT 1"
-            def do_app_query():
-                return self._call_sf_api_with_retry(lambda: self.sf.query(soql_app))
-            app_result = await asyncio.get_event_loop().run_in_executor(None, do_app_query)
-            if app_result.get('totalSize'):
-                return app_result['records'][0].get('OwnerId')
-            return None
-        except Exception as e:
-            logger.warning(f"Failed to fetch task assignee for application {application_id}: {e}")
-            return None
 
     # -----------------------------------------------------------------------
     # Test Score: Python-side data assembly (replaces Apex REST)

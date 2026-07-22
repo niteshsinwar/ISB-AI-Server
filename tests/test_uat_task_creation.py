@@ -104,7 +104,7 @@ if task_worthy and owner_id:
         print(f"    Subject: {task_data['Subject']}")
 
         try:
-            task_id = sf.create_verification_task(employment_log_id, task_data, owner_id)
+            task_id = sf.create_verification_task(employment_log_id, task_data)
             if task_id:
                 tasks_created.append(task_id)
                 print(f"    ✓ Task created: {task_id}")
